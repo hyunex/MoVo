@@ -47,7 +47,9 @@ class LibraryScanner(private val context: Context) {
     }
 
     suspend fun scanAll() = withContext(Dispatchers.IO) {
+        AppLog.i("library", "scan started")
         for (f in db.folders().all()) scan(f)
+        AppLog.i("library", "scan finished")
     }
 
     private suspend fun walk(dir: DocumentFile, prefix: String, found: MutableList<String>, folderId: Long) {

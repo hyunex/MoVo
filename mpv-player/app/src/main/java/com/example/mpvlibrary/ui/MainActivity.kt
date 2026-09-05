@@ -37,7 +37,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -168,6 +171,7 @@ fun AppRoot() {
                     else -> Screen.Library
                 }
             },
+            onSettings = { screen = Screen.Settings },
         )
         is Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Library })
     }
@@ -199,6 +203,35 @@ fun AppScaffold(
                 .padding(pad)
                 .fillMaxSize(),
             content = content,
+        )
+    }
+}
+
+/**
+ * Pull-to-refresh wrapper (material3 1.2 API): drag list down from the top
+ * to rescan. Works for both LazyColumn and LazyVerticalGrid children.
+ */
+@Composable
+fun PullRefreshWrapper(
+    modifier: Modifier = Modifier,
+    onRefresh: suspend () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val state = rememberPullToRefreshState()
+    if (state.isRefreshing) {
+        LaunchedEffect(Unit) {
+            try {
+                onRefresh()
+            } finally {
+                state.endRefresh()
+            }
+        }
+    }
+    Box(modifier.nestedScroll(state.nestedScrollConnection)) {
+        content()
+        PullToRefreshContainer(
+            state = state,
+            modifier = Modifier.align(Alignment.TopCenter),
         )
     }
 }
@@ -273,9 +306,13 @@ fun LibraryScreen(
                 } else {
                     if (isWide) {
                         // Wide screen / Foldable inner / Tablet layout
+                        PullRefreshWrapper(
+                            modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
+                            onRefresh = { scanner.scanAll() },
+                        ) {
                         LazyVerticalGrid(
                             columns = GridCells.Adaptive(minSize = 300.dp),
-                            modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
+                            modifier = Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
@@ -312,9 +349,14 @@ fun LibraryScreen(
                                 })
                             }
                         }
+                        }
                     } else {
                         // Compact mobile layout
-                        LazyColumn(Modifier.weight(1f)) {
+                        PullRefreshWrapper(
+                            modifier = Modifier.weight(1f),
+                            onRefresh = { scanner.scanAll() },
+                        ) {
+                        LazyColumn(Modifier.fillMaxSize()) {
                             if (recent.isNotEmpty()) {
                                 item {
                                     Text(
@@ -345,6 +387,7 @@ fun LibraryScreen(
                                     }
                                 })
                             }
+                        }
                         }
                     }
                 }
@@ -473,9 +516,10 @@ fun RecentCard(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack: () -> Unit) {
+fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack: () -> Unit, onSettings: () -> Unit) {
     val context = LocalContext.current
     val db = remember { AppDb.get(context) }
+    val scanner = remember { LibraryScanner(context) }
     val scope = rememberCoroutineScope()
     var folder by remember { mutableStateOf<FolderEntity?>(null) }
     var videos by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
@@ -622,6 +666,10 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                         }
                     },
                     actions = {
+                        IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
+                            Icon(Icons.Default.Refresh, "새로고침")
+                        }
+                        IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
                         IconButton(onClick = {
                             if (here.isNotEmpty()) selectedUris = setOf(here.first().uri)
                         }) {
@@ -669,9 +717,13 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
 
                 if (isWide) {
                     // Wide adaptive grid
+                    PullRefreshWrapper(
+                        modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
+                        onRefresh = { scanner.scanAll() },
+                    ) {
                     LazyVerticalGrid(
                         columns = GridCells.Adaptive(minSize = 320.dp),
-                        modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
+                        modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
@@ -734,9 +786,14 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                             }
                         }
                     }
+                    }
                 } else {
                     // Mobile list view
-                    LazyColumn(Modifier.weight(1f)) {
+                    PullRefreshWrapper(
+                        modifier = Modifier.weight(1f),
+                        onRefresh = { scanner.scanAll() },
+                    ) {
+                    LazyColumn(Modifier.fillMaxSize()) {
                         items(subDirs, key = { "d$folderId$it" }) { d ->
                             Row(
                                 Modifier.fillMaxWidth()
@@ -786,6 +843,7 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                                 }
                             }
                         }
+                    }
                     }
                 }
             }
