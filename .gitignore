@@ -1,0 +1,22 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+**/build/
+local.properties
+*.iml
+.DS_Store
+
+# Signing keystores (never commit)
+*.jks
+*.keystore
+
+# Debug logs & local artifacts
+*.log
+logs/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.hprof
