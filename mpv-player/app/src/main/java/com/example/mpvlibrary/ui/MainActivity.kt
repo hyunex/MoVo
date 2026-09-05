@@ -660,7 +660,6 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                                         else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
                                     },
                                     onLongClick = { toggleSelect(v.uri) },
-                                    onToggleSelect = { toggleSelect(v.uri) },
                                     onActionWatched = {
                                         val next = if (v.isWatched(threshold)) -1 else 1
                                         scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
@@ -714,7 +713,6 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                                     else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
                                 },
                                 onLongClick = { toggleSelect(v.uri) },
-                                onToggleSelect = { toggleSelect(v.uri) },
                                 onActionWatched = {
                                     val next = if (v.isWatched(threshold)) -1 else 1
                                     scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
@@ -794,7 +792,6 @@ fun VideoRow(
     inSelectionMode: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onToggleSelect: () -> Unit,
     onActionWatched: () -> Unit,
     onActionReset: () -> Unit,
     onActionDelete: () -> Unit,
@@ -811,13 +808,14 @@ fun VideoRow(
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Thumbnail with small top-right watched check badge
+        // Thumbnail: green top-end badge = watched, blue top-start badge = long-press selected.
         Thumb(
             uri = v.uri,
             modifier = Modifier
                 .size(116.dp, 66.dp)
                 .clip(RoundedCornerShape(8.dp)),
             isWatched = watched,
+            isSelected = isSelected,
         )
 
         Spacer(Modifier.width(12.dp))
@@ -905,41 +903,30 @@ fun VideoRow(
             }
         }
 
-        Spacer(Modifier.width(4.dp))
+        Spacer(Modifier.width(8.dp))
 
-        // Right side: Selection Checkbox & Context Menu
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(
-                checked = isSelected,
-                onCheckedChange = { onToggleSelect() },
-            )
-            Box {
-                IconButton(onClick = { showMenu = true }, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Default.MoreVert, "더보기", tint = Color.Gray)
-                }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    DropdownMenuItem(
-                        text = { Text(if (watched) "미시청으로 표시" else "시청 완료로 표시") },
-                        onClick = { onActionWatched(); showMenu = false },
-                        leadingIcon = { Icon(if (watched) Icons.Default.RemoveDone else Icons.Default.CheckCircle, null) },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("재생 기록 초기화") },
-                        onClick = { onActionReset(); showMenu = false },
-                        leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (isSelected) "선택 해제" else "선택") },
-                        onClick = { onToggleSelect(); showMenu = false },
-                        leadingIcon = { Icon(Icons.Default.Checklist, null) },
-                    )
-                    HorizontalDivider()
-                    DropdownMenuItem(
-                        text = { Text("삭제", color = MaterialTheme.colorScheme.error) },
-                        onClick = { onActionDelete(); showMenu = false },
-                        leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                    )
-                }
+        // Right side: file context menu only (selection is long-press only).
+        Box {
+            IconButton(onClick = { showMenu = true }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.MoreVert, "더보기", tint = Color.Gray)
+            }
+            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                DropdownMenuItem(
+                    text = { Text(if (watched) "미시청으로 표시" else "시청 완료로 표시") },
+                    onClick = { onActionWatched(); showMenu = false },
+                    leadingIcon = { Icon(if (watched) Icons.Default.RemoveDone else Icons.Default.CheckCircle, null) },
+                )
+                DropdownMenuItem(
+                    text = { Text("재생 기록 초기화") },
+                    onClick = { onActionReset(); showMenu = false },
+                    leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
+                )
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("삭제", color = MaterialTheme.colorScheme.error) },
+                    onClick = { onActionDelete(); showMenu = false },
+                    leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                )
             }
         }
     }
@@ -954,7 +941,6 @@ fun VideoGridCard(
     inSelectionMode: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onToggleSelect: () -> Unit,
     onActionWatched: () -> Unit,
     onActionReset: () -> Unit,
     onActionDelete: () -> Unit,
@@ -975,13 +961,7 @@ fun VideoGridCard(
     ) {
         Column {
             Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
-                Thumb(v.uri, Modifier.matchParentSize(), isWatched = watched)
-                // Checkbox top-start overlay
-                Checkbox(
-                    checked = isSelected,
-                    onCheckedChange = { onToggleSelect() },
-                    modifier = Modifier.align(Alignment.TopStart).padding(4.dp),
-                )
+                Thumb(v.uri, Modifier.matchParentSize(), isWatched = watched, isSelected = isSelected)
                 if (v.durationSec > 0) {
                     LinearProgressIndicator(
                         progress = { v.fraction.toFloat() },
@@ -1485,7 +1465,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 // ---------------------------------------------------------------- helpers
 
 @Composable
-fun Thumb(uri: String, modifier: Modifier, isWatched: Boolean = false) {
+fun Thumb(uri: String, modifier: Modifier, isWatched: Boolean = false, isSelected: Boolean = false) {
     val context = LocalContext.current
     var bmp by remember(uri) { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(uri) { bmp = Thumbs.get(context, uri) }
@@ -1498,6 +1478,23 @@ fun Thumb(uri: String, modifier: Modifier, isWatched: Boolean = false) {
             )
         } else {
             Icon(Icons.Default.Movie, null, tint = Color.Gray, modifier = Modifier.size(20.dp))
+        }
+        if (isSelected) {
+            // Dim the thumbnail so selection reads instantly, distinct from watched green.
+            Box(Modifier.matchParentSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)))
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                shadowElevation = 2.dp,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(4.dp)
+                    .size(20.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Check, "선택됨", tint = Color.White, modifier = Modifier.size(13.dp))
+                }
+            }
         }
         if (isWatched) {
             Surface(
@@ -1514,7 +1511,7 @@ fun Thumb(uri: String, modifier: Modifier, isWatched: Boolean = false) {
                 }
             }
         }
-    }
+}
 }
 
 fun fmtSize(bytes: Long): String {
