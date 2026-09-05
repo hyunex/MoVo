@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
+import android.content.res.Configuration
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -17,6 +18,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -45,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.example.mpvlibrary.data.AppDb
@@ -1112,7 +1115,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
-                // Interactive Seek Bar (Slider)
+                // Interactive Seek Bar (Slider) — 2x thicker track (10dp) with prominent 20dp thumb
+                val sliderColors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                    inactiveTrackColor = Color.White.copy(alpha = 0.35f),
+                )
                 Slider(
                     value = (if (isScrubbing) scrubPosition else position).toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                     onValueChange = {
@@ -1122,134 +1130,217 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     },
                     onValueChangeFinished = {
                         isScrubbing = false
-                        mpv("seek absolute $scrubPosition") {
-                            MPVLib.command(arrayOf("seek", scrubPosition.toString(), "absolute"))
-                            position = scrubPosition
-                            lastPosition = scrubPosition
+                        val maxTarget = if (duration > 0) (duration - 0.5).coerceAtLeast(0.0) else 0.0
+                        val target = scrubPosition.coerceIn(0.0, maxTarget)
+                        mpv("seek absolute $target") {
+                            MPVLib.command(arrayOf("seek", target.toString(), "absolute"))
+                            position = target
+                            lastPosition = target
                         }
                         resetControlsTimer()
                     },
                     valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
-                    modifier = Modifier.fillMaxWidth().height(24.dp),
-                    colors = SliderDefaults.colors(
-                        thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.3f),
-                    ),
+                    modifier = Modifier.fillMaxWidth().height(36.dp),
+                    colors = sliderColors,
+                    track = { sliderState ->
+                        SliderDefaults.Track(
+                            sliderState = sliderState,
+                            modifier = Modifier.height(10.dp),
+                            colors = sliderColors,
+                        )
+                    },
+                    thumb = {
+                        SliderDefaults.Thumb(
+                            interactionSource = remember { MutableInteractionSource() },
+                            modifier = Modifier.size(20.dp),
+                            colors = sliderColors,
+                        )
+                    },
                 )
 
-                // Time info & Aspect ratio mode selector button
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    val curTime = fmt(if (isScrubbing) scrubPosition else position)
-                    val durTime = fmt(duration)
-                    val remainSec = (duration - (if (isScrubbing) scrubPosition else position)).coerceAtLeast(0.0)
-                    val remainTime = "-${fmt(remainSec)}"
-                    Text(
-                        "$curTime / $durTime ($remainTime)",
-                        color = Color.White,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Medium,
-                    )
-                    Spacer(Modifier.weight(1f))
+                val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-                    // P0: repeat-one toggle (mpv loop-file)
-                    IconButton(
-                        onClick = { toggleRepeat() },
-                        modifier = Modifier.size(30.dp),
+                if (isLandscape) {
+                    // Landscape layout: Single unified bottom line bringing Time and Aspect Ratio
+                    // down aligned with the playback buttons, eliminating empty gaps on wide screens.
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(
-                            Icons.Default.RepeatOne, "한곡 반복",
-                            tint = if (repeatOne) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.7f),
-                            modifier = Modifier.size(18.dp),
+                        // Left: Time info
+                        val curTime = fmt(if (isScrubbing) scrubPosition else position)
+                        val durTime = fmt(duration)
+                        val remainSec = (duration - (if (isScrubbing) scrubPosition else position)).coerceAtLeast(0.0)
+                        val remainTime = "-${fmt(remainSec)}"
+                        Text(
+                            "$curTime / $durTime ($remainTime)",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f),
                         )
+
+                        // Center: Media controls
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            IconButton(onClick = { previous() }, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Default.SkipPrevious, "이전 영상", tint = Color.White, modifier = Modifier.size(28.dp))
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            IconButton(onClick = { seekRelative(-tapSeekSec) }, modifier = Modifier.size(42.dp)) {
+                                Icon(Icons.Default.Replay10, "${tapSeekSec.toInt()}초 뒤로", tint = Color.White, modifier = Modifier.size(24.dp))
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            FilledIconButton(
+                                onClick = { togglePlayPause() },
+                                modifier = Modifier.size(52.dp),
+                                shape = CircleShape,
+                                colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
+                            ) {
+                                Icon(
+                                    if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                    if (isPaused) "재생" else "일시정지",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(30.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            IconButton(onClick = { seekRelative(tapSeekSec) }, modifier = Modifier.size(42.dp)) {
+                                Icon(Icons.Default.Forward10, "${tapSeekSec.toInt()}초 앞으로", tint = Color.White, modifier = Modifier.size(24.dp))
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            IconButton(onClick = { advance() }, enabled = index < uris.size - 1, modifier = Modifier.size(44.dp)) {
+                                Icon(
+                                    Icons.Default.SkipNext, "다음 영상",
+                                    tint = if (index < uris.size - 1) Color.White else Color.Gray,
+                                    modifier = Modifier.size(28.dp),
+                                )
+                            }
+                        }
+
+                        // Right: Repeat & Aspect Ratio
+                        Row(
+                            Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(
+                                onClick = { toggleRepeat() },
+                                modifier = Modifier.size(32.dp),
+                            ) {
+                                Icon(
+                                    Icons.Default.RepeatOne, "한곡 반복",
+                                    tint = if (repeatOne) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.7f),
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            OutlinedButton(
+                                onClick = { cycleAspectRatio() },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                border = ButtonDefaults.outlinedButtonBorder.copy(
+                                    brush = Brush.linearGradient(listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0.4f)))
+                                ),
+                                modifier = Modifier.height(30.dp),
+                            ) {
+                                Icon(Icons.Default.AspectRatio, null, modifier = Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(currentAspectMode.shortTitle, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
                     }
-
-                    // Aspect ratio cycling button
-                    OutlinedButton(
-                        onClick = { cycleAspectRatio() },
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                        border = ButtonDefaults.outlinedButtonBorder.copy(
-                            brush = Brush.linearGradient(listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0.4f)))
-                        ),
-                        modifier = Modifier.height(30.dp),
+                } else {
+                    // Portrait layout (narrow width): Time & Aspect on upper row, Media buttons on lower row
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 2.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Icons.Default.AspectRatio, null, modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text(currentAspectMode.shortTitle, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-
-                Spacer(Modifier.height(6.dp))
-
-                // Centered Professional Media Playback Controls
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 6.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // Previous Track Button
-                    IconButton(
-                        onClick = { previous() },
-                        modifier = Modifier.size(48.dp),
-                    ) {
-                        Icon(Icons.Default.SkipPrevious, "이전 영상", tint = Color.White, modifier = Modifier.size(30.dp))
-                    }
-
-                    Spacer(Modifier.width(12.dp))
-
-                    // Rewind Button (configurable seconds)
-                    IconButton(
-                        onClick = { seekRelative(-tapSeekSec) },
-                        modifier = Modifier.size(44.dp),
-                    ) {
-                        Icon(Icons.Default.Replay10, "${tapSeekSec.toInt()}초 뒤로", tint = Color.White, modifier = Modifier.size(26.dp))
-                    }
-
-                    Spacer(Modifier.width(16.dp))
-
-                    // Prominent Play/Pause Button
-                    FilledIconButton(
-                        onClick = { togglePlayPause() },
-                        modifier = Modifier.size(56.dp),
-                        shape = CircleShape,
-                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    ) {
-                        Icon(
-                            if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                            if (isPaused) "재생" else "일시정지",
-                            tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(32.dp),
+                        val curTime = fmt(if (isScrubbing) scrubPosition else position)
+                        val durTime = fmt(duration)
+                        val remainSec = (duration - (if (isScrubbing) scrubPosition else position)).coerceAtLeast(0.0)
+                        val remainTime = "-${fmt(remainSec)}"
+                        Text(
+                            "$curTime / $durTime ($remainTime)",
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
                         )
-                    }
+                        Spacer(Modifier.weight(1f))
 
-                    Spacer(Modifier.width(16.dp))
-
-                    // Forward Button (configurable seconds)
-                    IconButton(
-                        onClick = { seekRelative(tapSeekSec) },
-                        modifier = Modifier.size(44.dp),
-                    ) {
-                        Icon(Icons.Default.Forward10, "${tapSeekSec.toInt()}초 앞으로", tint = Color.White, modifier = Modifier.size(26.dp))
-                    }
-
-                    Spacer(Modifier.width(12.dp))
-
-                    // Next Track Button
-                    IconButton(
-                        onClick = { advance() },
-                        enabled = index < uris.size - 1,
-                        modifier = Modifier.size(48.dp),
-                    ) {
-                        Icon(
-                            Icons.Default.SkipNext, "다음 영상",
-                            tint = if (index < uris.size - 1) Color.White else Color.Gray,
+                        IconButton(
+                            onClick = { toggleRepeat() },
                             modifier = Modifier.size(30.dp),
-                        )
+                        ) {
+                            Icon(
+                                Icons.Default.RepeatOne, "한곡 반복",
+                                tint = if (repeatOne) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.7f),
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = { cycleAspectRatio() },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                            border = ButtonDefaults.outlinedButtonBorder.copy(
+                                brush = Brush.linearGradient(listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0.4f)))
+                            ),
+                            modifier = Modifier.height(30.dp),
+                        ) {
+                            Icon(Icons.Default.AspectRatio, null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(currentAspectMode.shortTitle, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+
+                    // Centered Professional Media Playback Controls
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 6.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = { previous() }, modifier = Modifier.size(48.dp)) {
+                            Icon(Icons.Default.SkipPrevious, "이전 영상", tint = Color.White, modifier = Modifier.size(30.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        IconButton(onClick = { seekRelative(-tapSeekSec) }, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Default.Replay10, "${tapSeekSec.toInt()}초 뒤로", tint = Color.White, modifier = Modifier.size(26.dp))
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        FilledIconButton(
+                            onClick = { togglePlayPause() },
+                            modifier = Modifier.size(56.dp),
+                            shape = CircleShape,
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        ) {
+                            Icon(
+                                if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                if (isPaused) "재생" else "일시정지",
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(32.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        IconButton(onClick = { seekRelative(tapSeekSec) }, modifier = Modifier.size(44.dp)) {
+                            Icon(Icons.Default.Forward10, "${tapSeekSec.toInt()}초 앞으로", tint = Color.White, modifier = Modifier.size(26.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        IconButton(onClick = { advance() }, enabled = index < uris.size - 1, modifier = Modifier.size(48.dp)) {
+                            Icon(
+                                Icons.Default.SkipNext, "다음 영상",
+                                tint = if (index < uris.size - 1) Color.White else Color.Gray,
+                                modifier = Modifier.size(30.dp),
+                            )
+                        }
                     }
                 }
             }

@@ -20,3 +20,7 @@ captures/
 # IDE
 .idea/
 *.hprof
+
+# User-authored requirement docs (local only, never commit)
+/UI\ UX\ 개선.MD
+/요구사항.md
