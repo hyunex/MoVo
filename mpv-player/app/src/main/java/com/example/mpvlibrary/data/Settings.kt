@@ -41,6 +41,11 @@ class SettingsRepo(private val context: Context) {
         val KEY_THRESHOLD = doublePreferencesKey("watched_threshold")
         val KEY_AUTO_ADVANCE = booleanPreferencesKey("auto_advance")
         val KEY_MPV_OPTIONS = stringPreferencesKey("mpv_options")
+        val KEY_TAP_SEEK = doublePreferencesKey("tap_seek_sec")
+        val KEY_FAST_SPEED = doublePreferencesKey("fast_speed")
+        val KEY_REMEMBER_BRIGHT = booleanPreferencesKey("remember_brightness")
+        val KEY_SAVED_BRIGHT = doublePreferencesKey("saved_brightness")
+        val KEY_AUTO_SUB = booleanPreferencesKey("auto_subtitle")
 
         val DEFAULT_SPEED_PRESETS = listOf(0.5, 0.75, 1.0, 1.2, 1.25, 1.5, 1.75, 2.0)
         const val DEFAULT_VIDEO_ALIGN_Y = "-1"
@@ -78,17 +83,28 @@ class SettingsRepo(private val context: Context) {
     val videoAlignY: Flow<String> = context.dataStore.data.map {
         it[KEY_VIDEO_ALIGN_Y] ?: DEFAULT_VIDEO_ALIGN_Y
     }
-    val watchedThreshold: Flow<Double> = context.dataStore.data.map { it[KEY_THRESHOLD] ?: 0.9 }
-    val autoAdvance: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTO_ADVANCE] ?: false }
-    val mpvOptionsRaw: Flow<String> =
-        context.dataStore.data.map { it[KEY_MPV_OPTIONS] ?: DEFAULT_MPV_OPTIONS }
-
     suspend fun setDefaultSpeed(v: Double) { context.dataStore.edit { it[KEY_SPEED] = v } }
     suspend fun setSpeedPresets(presets: List<Double>) {
         context.dataStore.edit { it[KEY_SPEED_PRESETS] = formatSpeedPresets(presets) }
     }
     suspend fun setVideoAlignY(v: String) { context.dataStore.edit { it[KEY_VIDEO_ALIGN_Y] = v } }
+    val watchedThreshold: Flow<Double> = context.dataStore.data.map { it[KEY_THRESHOLD] ?: 0.9 }
+    val autoAdvance: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTO_ADVANCE] ?: false }
+    val mpvOptionsRaw: Flow<String> =
+        context.dataStore.data.map { it[KEY_MPV_OPTIONS] ?: DEFAULT_MPV_OPTIONS }
     suspend fun setThreshold(v: Double) { context.dataStore.edit { it[KEY_THRESHOLD] = v } }
     suspend fun setAutoAdvance(v: Boolean) { context.dataStore.edit { it[KEY_AUTO_ADVANCE] = v } }
     suspend fun setMpvOptions(raw: String) { context.dataStore.edit { it[KEY_MPV_OPTIONS] = raw } }
+    // P0: gesture & convenience settings
+    val tapSeekSec: Flow<Double> = context.dataStore.data.map { it[KEY_TAP_SEEK] ?: 10.0 }
+    val fastSpeed: Flow<Double> = context.dataStore.data.map { it[KEY_FAST_SPEED] ?: 2.0 }
+    val rememberBrightness: Flow<Boolean> = context.dataStore.data.map { it[KEY_REMEMBER_BRIGHT] ?: false }
+    val savedBrightness: Flow<Double> = context.dataStore.data.map { it[KEY_SAVED_BRIGHT] ?: -1.0 }
+    val autoSubtitle: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTO_SUB] ?: true }
+
+    suspend fun setTapSeekSec(v: Double) { context.dataStore.edit { it[KEY_TAP_SEEK] = v } }
+    suspend fun setFastSpeed(v: Double) { context.dataStore.edit { it[KEY_FAST_SPEED] = v } }
+    suspend fun setRememberBrightness(v: Boolean) { context.dataStore.edit { it[KEY_REMEMBER_BRIGHT] = v } }
+    suspend fun setSavedBrightness(v: Double) { context.dataStore.edit { it[KEY_SAVED_BRIGHT] = v } }
+    suspend fun setAutoSubtitle(v: Boolean) { context.dataStore.edit { it[KEY_AUTO_SUB] = v } }
 }

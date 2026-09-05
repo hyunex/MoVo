@@ -90,6 +90,55 @@ fun AppRoot() {
     LaunchedEffect(Unit) {
         scanner.scanAll()
     }
+    // P0: next-launch crash report (Next Player style, backed by AppLog file)
+    var crashFiles by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        crashFiles = kotlinx.coroutines.withContext(Dispatchers.IO) { AppLog.pendingCrashReports() }
+    }
+    if (crashFiles.isNotEmpty()) {
+        val latest = crashFiles.last()
+        var preview by remember(latest) { mutableStateOf(runCatching { latest.readText().take(3000) }.getOrDefault("(읽기 실패)")) }
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text("이전 실행에서 앱이 종료됨") },
+            text = {
+                Column {
+                    Text(
+                        "크래시 리포트가 저장되었습니다. 공유하여 문제를 제보할 수 있습니다.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        preview.ifEmpty { "(내용 없음)" },
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 240.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
+                }
+            },
+            confirmButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TextButton(onClick = {
+                        context.startActivity(Intent.createChooser(AppLog.shareFileIntent(context, latest), "크래시 리포트 공유"))
+                    }) { Text("공유") }
+                    TextButton(onClick = {
+                        AppLog.dismissCrashReports()
+                        crashFiles = emptyList()
+                    }) { Text("지우기") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    AppLog.dismissCrashReports()
+                    crashFiles = emptyList()
+                }) { Text("닫기") }
+            },
+        )
+    }
     BackHandler(enabled = screen !is Screen.Library) {
         when (val s = screen) {
             is Screen.Settings -> screen = Screen.Library
@@ -1053,6 +1102,11 @@ fun SettingsScreen(onBack: () -> Unit) {
     var autoAdvance by remember { mutableStateOf(false) }
     var mpvOptions by remember { mutableStateOf("") }
     var loaded by remember { mutableStateOf(false) }
+    // P0: gesture & convenience settings
+    var tapSeekSec by remember { mutableStateOf(10.0) }
+    var fastSpeed by remember { mutableStateOf(2.0) }
+    var rememberBright by remember { mutableStateOf(false) }
+    var autoSub by remember { mutableStateOf(true) }
 
     // UI state for inputs & modals
     var newSpeedInput by remember { mutableStateOf("") }
@@ -1067,6 +1121,10 @@ fun SettingsScreen(onBack: () -> Unit) {
         threshold = settings.watchedThreshold.first()
         autoAdvance = settings.autoAdvance.first()
         mpvOptions = settings.mpvOptionsRaw.first()
+        tapSeekSec = settings.tapSeekSec.first()
+        fastSpeed = settings.fastSpeed.first()
+        rememberBright = settings.rememberBrightness.first()
+        autoSub = settings.autoSubtitle.first()
         loaded = true
     }
     if (!loaded) return
@@ -1288,6 +1346,79 @@ fun SettingsScreen(onBack: () -> Unit) {
                             Switch(
                                 checked = autoAdvance,
                                 onCheckedChange = { autoAdvance = it; scope.launch { settings.setAutoAdvance(it) } },
+                            )
+                        }
+                    }
+                }
+            }
+
+            // P0: 제스처 및 재생 편의 설정
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("제스처 및 재생 편의", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+
+                        Spacer(Modifier.height(12.dp))
+                        Text("더블탭 탐색 시간: ${tapSeekSec.toInt()}초", style = MaterialTheme.typography.bodyMedium)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
+                            listOf(5.0, 10.0, 15.0, 30.0).forEach { s ->
+                                FilterChip(
+                                    selected = tapSeekSec == s,
+                                    onClick = {
+                                        tapSeekSec = s
+                                        scope.launch { settings.setTapSeekSec(s) }
+                                    },
+                                    label = { Text("${s.toInt()}초") },
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(12.dp))
+                        Text("롱프레스 쾌속 배속: ${fastSpeed}x", style = MaterialTheme.typography.bodyMedium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Slider(
+                                value = fastSpeed.toFloat(),
+                                onValueChange = { fastSpeed = ((it * 4).roundToInt() / 4.0).coerceIn(1.5, 4.0) },
+                                onValueChangeFinished = { scope.launch { settings.setFastSpeed(fastSpeed) } },
+                                valueRange = 1.5f..4.0f,
+                                steps = 9,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+
+                        HorizontalDivider(Modifier.padding(vertical = 8.dp))
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("밝기 기억하기", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                                Text(
+                                    "제스처로 조절한 화면 밝기를 다음 재생에도 유지합니다.",
+                                    style = MaterialTheme.typography.bodySmall, color = Color.Gray,
+                                )
+                            }
+                            Switch(
+                                checked = rememberBright,
+                                onCheckedChange = { rememberBright = it; scope.launch { settings.setRememberBrightness(it) } },
+                            )
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("외부 자막 자동 로드", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+                                Text(
+                                    "영상과 같은 이름의 자막 파일(.srt/.vtt/.ass 등)을 자동으로 불러옵니다.",
+                                    style = MaterialTheme.typography.bodySmall, color = Color.Gray,
+                                )
+                            }
+                            Switch(
+                                checked = autoSub,
+                                onCheckedChange = { autoSub = it; scope.launch { settings.setAutoSubtitle(it) } },
                             )
                         }
                     }

@@ -61,4 +61,45 @@ object MpvPath {
     }
 
     private fun short(u: Uri): String = u.lastPathSegment ?: u.toString()
+
+    /** Subtitle extensions mpv can render. */
+    val SUB_EXTS = setOf("srt", "vtt", "ass", "ssa", "smi", "sub")
+
+    /**
+     * Pure matcher: sibling files sharing the video basename with a subtitle
+     * extension, e.g. `Ep01.ko.srt` for `Ep01.mp4`. Unit-tested.
+     */
+    fun matchSubtitles(videoName: String, siblingNames: List<String>): List<String> {
+        val base = videoName.substringBeforeLast('.')
+        if (base.isEmpty()) return emptyList()
+        val prefix = "$base."
+        return siblingNames.filter { sib ->
+            sib != videoName && sib.startsWith(prefix) &&
+                sib.substringAfterLast('.', "").lowercase() in SUB_EXTS
+        }.sorted()
+    }
+    /**
+     * Copy a small sidecar file (subtitle) into app cache and return a real
+     * filesystem path. mpv opens plain paths far more reliably than fd://
+     * for subtitle demuxers.
+     */
+    fun cacheCopy(context: Context, uri: Uri, name: String): File? {
+        return try {
+            val dir = File(context.cacheDir, "subs").apply { mkdirs() }
+            val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").takeLast(64)
+            val out = File(dir, "${System.currentTimeMillis()}_$safe")
+            context.contentResolver.openInputStream(uri)?.use { ins ->
+                out.outputStream().use { outs -> ins.copyTo(outs) }
+            } ?: return null
+            if (out.length() == 0L) {
+                out.delete()
+                return null
+            }
+            AppLog.i(TAG, "cached ${short(uri)} -> ${out.name} (${out.length()}B)")
+            out
+        } catch (e: Exception) {
+            AppLog.w(TAG, "cacheCopy failed for ${short(uri)}: ${e.message}")
+            null
+        }
+    }
 }

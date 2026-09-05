@@ -34,12 +34,46 @@ object AppLog {
             Thread.setDefaultUncaughtExceptionHandler { t, e ->
                 try {
                     e("crash", "UNCAUGHT on ${t.name}: $e\n${e.stackTrace.take(30).joinToString("\n")}")
+                    writeCrashReport(t, e)
                 } catch (_: Exception) { }
                 prev?.uncaughtException(t, e)
             }
         }
     }
 
+    /** Synchronous crash snapshot for the next-launch report dialog. */
+    private fun writeCrashReport(t: Thread, e: Throwable) {
+        val d = dir ?: return
+        val name = "crash-${fileFmt.format(Date())}.log"
+        val sb = StringBuilder()
+        sb.append("MoVo crash report\n")
+        sb.append("time=${dateFmt.format(Date())} thread=${t.name}\n")
+        sb.append("device=${Build.MODEL} api=${Build.VERSION.SDK_INT}\n\n")
+        sb.append("$e\n")
+        sb.append(e.stackTrace.take(40).joinToString("\n"))
+        sb.append("\n\n--- recent log ---\n")
+        sb.append(buf.toList().takeLast(200).joinToString("\n"))
+        sb.append("\n")
+        File(d, name).writeText(sb.toString())
+    }
+
+    @Synchronized
+    fun pendingCrashReports(): List<File> =
+        dir?.listFiles { f -> f.name.startsWith("crash-") }?.sortedBy { it.name } ?: emptyList()
+
+    fun shareFileIntent(ctx: Context, f: File): Intent {
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", f)
+        return Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
+    @Synchronized
+    fun dismissCrashReports() {
+        runCatching { dir?.listFiles { f -> f.name.startsWith("crash-") }?.forEach { it.delete() } }
+    }
     private fun toLogcat(level: String, tag: String, msg: String) {
         val m = if (msg.length > 3500) msg.take(3500) + "…" else msg
         when (level) {

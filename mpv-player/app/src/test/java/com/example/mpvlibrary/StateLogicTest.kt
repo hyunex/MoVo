@@ -3,6 +3,7 @@ package com.example.mpvlibrary
 import com.example.mpvlibrary.data.SettingsRepo
 import com.example.mpvlibrary.data.VideoAlign
 import com.example.mpvlibrary.data.VideoEntity
+import com.example.mpvlibrary.mpv.MpvPath
 import com.example.mpvlibrary.ui.naturalKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -85,6 +86,21 @@ class StateLogicTest {
         assertEquals(
             listOf("Episode 1.mkv", "Episode 2.mkv", "Episode 10.mkv"),
             names.sortedBy { naturalKey(it) },
+        )
+    }
+
+    @Test fun subtitleBasenameMatching() {
+        val sibs = listOf("Ep01.mp4", "Ep01.srt", "Ep01.ko.vtt", "Ep01.nfo", "Ep02.srt", "readme.txt")
+        assertEquals(
+            listOf("Ep01.ko.vtt", "Ep01.srt"),
+            MpvPath.matchSubtitles("Ep01.mp4", sibs),
+        )
+        // Video file itself and non-subtitle extensions never match.
+        assertTrue(MpvPath.matchSubtitles("Ep01.mp4", listOf("Ep01.mp4", "Ep01.jpg")).isEmpty())
+        // Case-insensitive extension.
+        assertEquals(
+            listOf("Ep01.SRT"),
+            MpvPath.matchSubtitles("Ep01.mp4", listOf("Ep01.SRT")),
         )
     }
 }
