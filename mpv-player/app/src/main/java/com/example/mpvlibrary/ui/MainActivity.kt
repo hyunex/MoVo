@@ -195,7 +195,7 @@ fun LibraryScreen(
     }
 
     AppScaffold(
-        title = "영상 라이브러리",
+        title = "MoVo",
         onBack = null,
         actions = {
             IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
