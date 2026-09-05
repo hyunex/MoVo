@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -218,21 +219,32 @@ fun PullRefreshWrapper(
     content: @Composable () -> Unit,
 ) {
     val state = rememberPullToRefreshState()
+    var isRefreshing by remember { mutableStateOf(false) }
+
     if (state.isRefreshing) {
-        LaunchedEffect(Unit) {
+        LaunchedEffect(true) {
+            isRefreshing = true
             try {
                 onRefresh()
             } finally {
                 state.endRefresh()
+                isRefreshing = false
             }
         }
     }
-    Box(modifier.nestedScroll(state.nestedScrollConnection)) {
+
+    Box(
+        modifier = modifier
+            .clipToBounds()
+            .nestedScroll(state.nestedScrollConnection),
+    ) {
         content()
-        PullToRefreshContainer(
-            state = state,
-            modifier = Modifier.align(Alignment.TopCenter),
-        )
+        if (state.verticalOffset > 0f || state.isRefreshing || isRefreshing) {
+            PullToRefreshContainer(
+                state = state,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
+        }
     }
 }
 
@@ -299,20 +311,24 @@ fun LibraryScreen(
                     Text("영상 폴더 등록")
                 }
 
-                if (folders.isEmpty()) {
-                    Box(Modifier.fillMaxSize().weight(1f), contentAlignment = Alignment.Center) {
-                        Text("영상 폴더를 등록하세요", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
-                    }
-                } else {
-                    if (isWide) {
-                        // Wide screen / Foldable inner / Tablet layout
-                        PullRefreshWrapper(
-                            modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
-                            onRefresh = { scanner.scanAll() },
+                PullRefreshWrapper(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    onRefresh = { scanner.scanAll() },
+                ) {
+                    if (folders.isEmpty()) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState()),
+                            contentAlignment = Alignment.Center,
                         ) {
+                            Text("영상 폴더를 등록하세요", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
+                        }
+                    } else if (isWide) {
+                        // Wide screen / Foldable inner / Tablet layout
                         LazyVerticalGrid(
                             columns = GridCells.Adaptive(minSize = 300.dp),
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
@@ -349,13 +365,8 @@ fun LibraryScreen(
                                 })
                             }
                         }
-                        }
                     } else {
                         // Compact mobile layout
-                        PullRefreshWrapper(
-                            modifier = Modifier.weight(1f),
-                            onRefresh = { scanner.scanAll() },
-                        ) {
                         LazyColumn(Modifier.fillMaxSize()) {
                             if (recent.isNotEmpty()) {
                                 item {
@@ -387,7 +398,6 @@ fun LibraryScreen(
                                     }
                                 })
                             }
-                        }
                         }
                     }
                 }
@@ -866,8 +876,12 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                         val targets = deleteTargetUris
                         scope.launch(Dispatchers.IO) {
                             targets.forEach { u ->
+                                val parsed = Uri.parse(u)
                                 runCatching {
-                                    DocumentFile.fromSingleUri(context, Uri.parse(u))?.delete()
+                                    DocumentFile.fromSingleUri(context, parsed)?.delete()
+                                }
+                                runCatching {
+                                    android.provider.DocumentsContract.deleteDocument(context.contentResolver, parsed)
                                 }
                             }
                             db.videos().deleteByUris(targets)

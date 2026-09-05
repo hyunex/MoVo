@@ -202,7 +202,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         // P0: pause when headphones disconnect
         noisyReceiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
-                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && !isPaused && initialized) {
+                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && !isPaused && initialized && !isFinishing) {
                     AppLog.i(TAG, "headset disconnected — auto pause")
                     togglePlayPause()
                 }
@@ -234,11 +234,22 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         try {
                             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         } catch (_: Exception) {}
-                        val subPlayable = MpvPath.open(this@PlayerActivity, uri)
-                        mpv("외부 자막 추가") {
-                            MPVLib.command(arrayOf("sub-add", subPlayable.path, "select"))
-                            refreshTracks()
-                            showHud(HudMode.ASPECT, "외부 자막 추가됨")
+                        val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(this@PlayerActivity, uri)?.name ?: "sub.srt"
+                        val cached = MpvPath.cacheCopy(this@PlayerActivity, uri, name)
+                        if (cached != null) {
+                            mpv("외부 자막 추가") {
+                                MPVLib.command(arrayOf("sub-add", cached.absolutePath, "select"))
+                                refreshTracks()
+                                showHud(HudMode.ASPECT, "외부 자막 추가됨")
+                            }
+                        } else {
+                            val subPlayable = MpvPath.open(this@PlayerActivity, uri)
+                            subPlayables += subPlayable
+                            mpv("외부 자막 추가") {
+                                MPVLib.command(arrayOf("sub-add", subPlayable.path, "select"))
+                                refreshTracks()
+                                showHud(HudMode.ASPECT, "외부 자막 추가됨")
+                            }
                         }
                     }
                 }
@@ -577,9 +588,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun seekRelative(deltaSec: Double) {
-        val target = (position + deltaSec).coerceIn(0.0, duration.coerceAtLeast(1.0))
-        mpv("seek relative $deltaSec") {
-            MPVLib.command(arrayOf("seek", deltaSec.toString(), "relative"))
+        val maxTarget = if (duration > 0) (duration - 0.5).coerceAtLeast(0.0) else 0.0
+        val target = if (duration > 0) (position + deltaSec).coerceIn(0.0, maxTarget) else (position + deltaSec).coerceAtLeast(0.0)
+        mpv("seek absolute $target") {
+            MPVLib.command(arrayOf("seek", target.toString(), "absolute"))
             position = target
             lastPosition = target
         }
