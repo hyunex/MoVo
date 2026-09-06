@@ -16,7 +16,9 @@ import java.io.File
  */
 object MpvPath {
     private const val TAG = "mpv"
-
+    const val MAX_SUB_BYTES = 5L * 1024 * 1024
+    private const val MAX_SUBS_BYTES = 20L * 1024 * 1024
+    private const val MAX_SUB_FILES = 50
     class Playable(
         val path: String,
         val note: String,
@@ -86,20 +88,51 @@ object MpvPath {
     fun cacheCopy(context: Context, uri: Uri, name: String): File? {
         return try {
             val dir = File(context.cacheDir, "subs").apply { mkdirs() }
+            pruneSubs(dir)
             val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").takeLast(64)
             val out = File(dir, "${System.currentTimeMillis()}_$safe")
+            var total = 0L
             context.contentResolver.openInputStream(uri)?.use { ins ->
-                out.outputStream().use { outs -> ins.copyTo(outs) }
+                out.outputStream().use { outs ->
+                    val buf = ByteArray(8192)
+                    while (true) {
+                        val n = ins.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_SUB_BYTES) {
+                            AppLog.w(TAG, "subtitle too large, rejected ${short(uri)}")
+                            runCatching { outs.flush() }
+                            runCatching { out.delete() }
+                            return null
+                        }
+                        outs.write(buf, 0, n)
+                    }
+                }
             } ?: return null
             if (out.length() == 0L) {
                 out.delete()
                 return null
             }
             AppLog.i(TAG, "cached ${short(uri)} -> ${out.name} (${out.length()}B)")
+            pruneSubs(dir)
             out
         } catch (e: Exception) {
             AppLog.w(TAG, "cacheCopy failed for ${short(uri)}: ${e.message}")
             null
+        }
+    }
+
+    private fun pruneSubs(dir: File) {
+        runCatching {
+            val files = dir.listFiles()?.sortedBy { it.lastModified() } ?: return
+            var total = files.sumOf { it.length() }
+            var count = files.size
+            for (f in files) {
+                if (total <= MAX_SUBS_BYTES && count <= MAX_SUB_FILES) break
+                total -= f.length()
+                count--
+                f.delete()
+            }
         }
     }
 }

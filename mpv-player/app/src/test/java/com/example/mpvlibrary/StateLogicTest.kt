@@ -57,6 +57,15 @@ class StateLogicTest {
             opts,
         )
     }
+    @Test fun mpvDangerousOptionsBlocked() {
+        val opts = SettingsRepo.parseOptions(
+            "hwdec=auto\nconfig-dir=/tmp\nload-script=evil.lua\nhttp-header-fields=x\nscreenshot-directory=/tmp\n",
+        )
+        assertEquals(listOf("hwdec" to "auto"), opts)
+        assertTrue(SettingsRepo.isBlockedOption("config-dir"))
+        assertTrue(SettingsRepo.isBlockedOption("SCRIPT-OPTS"))
+        assertFalse(SettingsRepo.isBlockedOption("hwdec"))
+    }
 
     @Test fun videoAlignEnumMappings() {
         assertEquals("-1", VideoAlign.TOP.value)

@@ -73,6 +73,38 @@ class SettingsRepo(private val context: Context) {
                 .map { it.trim() }
                 .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains("=") }
                 .map { it.substringBefore('=').trim() to it.substringAfter('=').trim() }
+                .filter { (k, v) -> k.isNotEmpty() && v.isNotEmpty() && !isBlockedOption(k) }
+                .toList()
+
+        private val BLOCKED_EXACT = setOf(
+            "o", "config", "config-dir", "include",
+            "load-script", "script", "scripts", "script-file",
+            "force-window", "idle",
+        )
+
+        private val BLOCKED_PREFIX = listOf(
+            "script", "lua", "js", "javascript", "ytdl",
+            "tls", "ssl", "http", "proxy", "cookie",
+            "screenshot", "watch-later", "write-filename-in-watch-later",
+            "record", "stream-record", "dump", "cache-dir",
+            "gpu-shader-cache-dir", "icc-cache-dir", "config", "include", "load-script",
+        )
+
+        /** File / script / network exfiltration options must never come from pasted text. */
+        fun isBlockedOption(key: String): Boolean {
+            val k = key.trim().lowercase()
+            if (k.isEmpty()) return true
+            if (k in BLOCKED_EXACT) return true
+            return BLOCKED_PREFIX.any { k == it || k.startsWith(it) }
+        }
+
+        /** Keys dropped by [parseOptions] so callers can warn instead of failing silently. */
+        fun blockedOptions(raw: String): List<String> =
+            raw.lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("#") && it.contains("=") }
+                .map { it.substringBefore('=').trim() }
+                .filter { isBlockedOption(it) }
                 .toList()
     }
 

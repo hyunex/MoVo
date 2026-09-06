@@ -399,6 +399,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
             // User raw MPV options (excluding speed & video-align-y which are controlled via dedicated UI)
             val raw = settings.mpvOptionsRaw.first()
+            val blocked = SettingsRepo.blockedOptions(raw)
+            if (blocked.isNotEmpty()) AppLog.w(TAG, "mpv options blocked for safety: ${blocked.distinct().take(10).joinToString(",")}")
             for ((k, v) in SettingsRepo.parseOptions(raw)) {
                 if (k == "speed" || k == "video-align-y") continue
                 mpv("mpv 옵션 $k=$v") {

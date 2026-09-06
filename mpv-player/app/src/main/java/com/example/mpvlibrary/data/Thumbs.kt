@@ -14,7 +14,8 @@ import java.security.MessageDigest
 /** Disk-cached video thumbnails extracted with MediaMetadataRetriever. */
 object Thumbs {
     private const val TARGET_PX = 256
-
+    private const val MAX_THUMBS_BYTES = 50L * 1024 * 1024
+    private const val MAX_THUMB_FILES = 500
     private fun cacheFile(context: Context, uri: String): File {
         val hash = MessageDigest.getInstance("SHA-1").digest(uri.toByteArray())
             .joinToString("") { "%02x".format(it) }
@@ -37,11 +38,26 @@ object Thumbs {
             if (bmp == null) return@withContext null
             val scaled = scaleDown(bmp)
             FileOutputStream(file).use { scaled.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            prune(context)
             scaled
         } catch (_: Exception) {
             null
         } finally {
             runCatching { retriever.release() }
+        }
+    }
+    private fun prune(context: Context) {
+        runCatching {
+            val dir = File(context.cacheDir, "thumbs")
+            val files = dir.listFiles()?.sortedBy { it.lastModified() } ?: return
+            var total = files.sumOf { it.length() }
+            var count = files.size
+            for (f in files) {
+                if (total <= MAX_THUMBS_BYTES && count <= MAX_THUMB_FILES) break
+                total -= f.length()
+                count--
+                f.delete()
+            }
         }
     }
 

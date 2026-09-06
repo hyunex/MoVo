@@ -359,8 +359,10 @@ fun LibraryScreen(
                             items(folders, key = { it.id }) { f ->
                                 FolderCard(f, onOpen = { onOpenFolder(f.id) }, onDelete = {
                                     scope.launch(Dispatchers.IO) {
+                                        val folder = db.folders().byId(f.id)
                                         db.folders().delete(f.id)
                                         db.videos().deleteForFolder(f.id)
+                                        folder?.let { runCatching { LibraryScanner.releasePermission(context, Uri.parse(it.treeUri)) } }
                                     }
                                 })
                             }
@@ -393,8 +395,10 @@ fun LibraryScreen(
                             items(folders, key = { it.id }) { f ->
                                 FolderCard(f, onOpen = { onOpenFolder(f.id) }, onDelete = {
                                     scope.launch(Dispatchers.IO) {
+                                        val folder = db.folders().byId(f.id)
                                         db.folders().delete(f.id)
                                         db.videos().deleteForFolder(f.id)
+                                        folder?.let { runCatching { LibraryScanner.releasePermission(context, Uri.parse(it.treeUri)) } }
                                     }
                                 })
                             }
@@ -877,11 +881,17 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                         scope.launch(Dispatchers.IO) {
                             targets.forEach { u ->
                                 val parsed = Uri.parse(u)
-                                runCatching {
-                                    DocumentFile.fromSingleUri(context, parsed)?.delete()
-                                }
-                                runCatching {
-                                    android.provider.DocumentsContract.deleteDocument(context.contentResolver, parsed)
+                                val viaDoc = runCatching {
+                                    DocumentFile.fromSingleUri(context, parsed)?.delete() == true
+                                }.getOrDefault(false)
+                                val viaContract = if (!viaDoc) {
+                                    runCatching {
+                                        android.provider.DocumentsContract.deleteDocument(context.contentResolver, parsed)
+                                        true
+                                    }.getOrDefault(false)
+                                } else true
+                                if (!viaDoc && !viaContract) {
+                                    AppLog.w("library", "file delete failed, unregistering only")
                                 }
                             }
                             db.videos().deleteByUris(targets)
@@ -1630,7 +1640,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             text = {
                 Column {
                     Text(
-                        "libmpv에 전달할 옵션을 key=value 형식으로 한 줄씩 입력하세요.\n예: hwdec=auto, profile=fast",
+                        "libmpv에 전달할 옵션을 key=value 형식으로 한 줄씩 입력하세요.\n예: hwdec=auto, profile=fast\n보안상 config·script·네트워크·저장 경로 옵션은 적용되지 않습니다.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.Gray,
                         modifier = Modifier.padding(bottom = 8.dp),

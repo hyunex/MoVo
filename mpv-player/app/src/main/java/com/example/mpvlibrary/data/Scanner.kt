@@ -29,6 +29,14 @@ class LibraryScanner(private val context: Context) {
             }
         }
 
+        fun releasePermission(context: Context, treeUri: Uri) {
+            runCatching {
+                context.contentResolver.releasePersistableUriPermission(
+                    treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+        }
+
         fun displayName(context: Context, treeUri: Uri): String {
             val doc = DocumentFile.fromTreeUri(context, treeUri)
             doc?.name?.let { return it }
