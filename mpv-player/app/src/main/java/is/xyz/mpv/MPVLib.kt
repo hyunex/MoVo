@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Taken verbatim from mpv-android (https://github.com/mpv-android/mpv-android),
+// Copyright (c) 2016 Ilya Zhuravlev, Copyright (c) 2016 sfan5 <sfan5@live.de>.
+// Full MIT text in THIRD-PARTY-NOTICES.md.
 package `is`.xyz.mpv
 
 import android.content.Context

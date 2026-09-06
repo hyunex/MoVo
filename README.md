@@ -101,5 +101,6 @@ adb install -r app-arm64-v8a-debug.apk
 ---
 
 ## 라이선스
-본 프로젝트는 [LICENSE](LICENSE) 하에 배포됩니다.
-내장된 MPV 및 FFmpeg 컴포넌트는 해당 오픈소스 라이선스(GPL/LGPL)를 준수합니다.
+MoVo는 [GNU General Public License v3.0](LICENSE) 하에 배포됩니다.
+동봉된 `libmpv.so`/FFmpeg 네이티브 바이너리가 GPL 빌드이므로 배포물 전체에 GPLv3가 적용됩니다.
+서드파티 고지 및 바이너리 출처는 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)를 참조하세요.
