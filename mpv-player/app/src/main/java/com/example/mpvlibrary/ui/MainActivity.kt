@@ -623,7 +623,7 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
             .filter { it.dirPath == path }
             .filter { query.isBlank() || it.name.contains(query, ignoreCase = true) }
             .filter { !unseenOnly || (it.positionSec == 0.0) }
-            .sortedBy { if (sortByName) naturalKey(it.name) else "%.20f".format(-it.lastPlayedAt) }
+            .sortedWith(if (sortByName) compareBy { naturalKey(it.name) } else compareByDescending { it.lastPlayedAt })
             .toList()
     }
     val allUris = here.map { it.uri }
