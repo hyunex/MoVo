@@ -75,10 +75,3 @@ requirement for binary distribution:
 - `org.jetbrains.kotlinx:kotlinx-coroutines-android` + Kotlin stdlib
 - JUnit 4 (Eclipse Public License 1.0, test scope only — not distributed)
 
-## 4. Ideas only, no copied code
-
-Gesture layouts, speed presets, crash-report UX and similar concepts were
-studied from VLC for Android (GPLv2), Next Player (GPLv3), Fermata (GPLv3),
-Just Player (Unlicense), Nova (Apache 2.0) and mpvKt/mpvEx (Apache 2.0).
-No source code was copied from these projects. Ideas and functional
-requirements are not copyrightable expression; no obligations arise.
