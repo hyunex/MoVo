@@ -171,6 +171,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var audioTracks by mutableStateOf<List<TrackItem>>(emptyList())
     private var subDelaySec by mutableDoubleStateOf(0.0)
     private var audioDelaySec by mutableDoubleStateOf(0.0)
+    private var subFontSize by mutableStateOf(SettingsRepo.DEFAULT_SUB_FONT_SIZE)
+    private var subColorHex by mutableStateOf(SettingsRepo.DEFAULT_SUB_COLOR)
 
     // Gesture HUD feedback
     private var hudMode by mutableStateOf(HudMode.NONE)
@@ -335,6 +337,18 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                 mpv("sub-delay 0.0") { MPVLib.setPropertyDouble("sub-delay", 0.0) }
                             },
                             onLoadExternalSub = { subPicker.launch(arrayOf("*/*")) },
+                            fontSize = subFontSize,
+                            subColor = subColorHex,
+                            onFontSizeChange = { v ->
+                                subFontSize = v.coerceIn(20.0, 120.0)
+                                applySubStyle()
+                            },
+                            onFontSizeFinal = { lifecycleScope.launch { settings.setSubFontSize(subFontSize) } },
+                            onSubColor = { c ->
+                                subColorHex = c
+                                applySubStyle()
+                                lifecycleScope.launch { settings.setSubColor(c) }
+                            },
                             onDismiss = { showSubDialog = false },
                         )
                     }
@@ -414,6 +428,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             speed = settings.defaultSpeed.first()
             preFastPlaySpeed = speed
             mpv("speed=$speed") { MPVLib.setPropertyDouble("speed", speed) }
+            subFontSize = settings.subFontSize.first().coerceIn(20.0, 120.0)
+            subColorHex = settings.subColor.first().takeIf { it.matches(Regex("#[0-9A-Fa-f]{6}")) }
+                ?: SettingsRepo.DEFAULT_SUB_COLOR
+            applySubStyle()
             // P0: configurable gestures & saved brightness
             tapSeekSec = settings.tapSeekSec.first().coerceIn(1.0, 60.0)
             fastSpeedSetting = settings.fastSpeed.first().coerceIn(1.25, 4.0)
@@ -698,6 +716,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         lifecycleScope.launch { settings.setDefaultSpeed(s) }
         showHud(HudMode.ASPECT, "재생 속도: ${s}x")
         resetControlsTimer()
+    }
+
+    // Subtitle style: mpv sub-font-size + sub-color, applied live and persisted.
+    private fun applySubStyle() {
+        val size = subFontSize.roundToInt().toString()
+        mpv("자막 스타일 ${size}/${subColorHex}") {
+            val r1 = MPVLib.setOptionString("sub-font-size", size)
+            val r2 = MPVLib.setOptionString("sub-color", subColorHex)
+            if (r1 < 0 || r2 < 0) AppLog.w(TAG, "sub style rejected: size=$size color=$subColorHex")
+            else AppLog.i(TAG, "sub style applied: size=$size color=$subColorHex")
+        }
     }
 
     // P0: repeat-one toggle via mpv loop-file
@@ -1359,6 +1388,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         onAdjustDelay: (Double) -> Unit,
         onResetDelay: () -> Unit,
         onLoadExternalSub: () -> Unit,
+        fontSize: Double,
+        subColor: String,
+        onFontSizeChange: (Double) -> Unit,
+        onFontSizeFinal: () -> Unit,
+        onSubColor: (String) -> Unit,
         onDismiss: () -> Unit,
     ) {
         val currentSelectedId = tracks.find { it.isSelected }?.id ?: -1
@@ -1441,6 +1475,57 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     HorizontalDivider()
                     Spacer(Modifier.height(12.dp))
 
+                    // Subtitle style: size + color (applied live, persisted)
+                    Text(
+                        "자막 스타일: 크기 ${fontSize.roundToInt()}",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Slider(
+                        value = fontSize.toFloat(),
+                        onValueChange = { onFontSizeChange(it.toDouble()) },
+                        onValueChangeFinished = { onFontSizeFinal() },
+                        valueRange = 20f..120f,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SettingsRepo.SUB_COLOR_PRESETS.forEach { hex ->
+                            val selected = hex.equals(subColor, ignoreCase = true)
+                            FilterChip(
+                                selected = selected,
+                                onClick = { onSubColor(hex) },
+                                label = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(
+                                            Modifier
+                                                .size(14.dp)
+                                                .clip(RoundedCornerShape(7.dp))
+                                                .background(
+                                                    runCatching {
+                                                        Color(
+                                                            hex.removePrefix("#").toLong(16).toInt() or 0xFF000000.toInt(),
+                                                        )
+                                                    }.getOrDefault(Color.White),
+                                                ),
+                                        )
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(hex)
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+                    HorizontalDivider()
+                    Spacer(Modifier.height(12.dp))
                     // Subtitle Delay / Sync adjustment
                     Text(
                         "자막 싱크: ${(delaySec * 1000).roundToInt()}ms",

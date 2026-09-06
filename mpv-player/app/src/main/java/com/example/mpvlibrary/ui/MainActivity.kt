@@ -288,6 +288,11 @@ fun LibraryScreen(
         }
     }
 
+    // 중단 지점이 있는 미시청 영상: 탭하면 PlayerActivity가 start 옵션으로 이어 재생
+    val continueWatching = remember(recent, threshold) {
+        recent.filter { it.positionSec > 0 && !it.isWatched(threshold) }.take(6)
+    }
+
     AppScaffold(
         title = "MoVo",
         onBack = null,
@@ -332,6 +337,22 @@ fun LibraryScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
+                            if (continueWatching.isNotEmpty()) {
+                                item(span = { GridItemSpan(maxLineSpan) }) {
+                                    Text(
+                                        "이어보기",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+                                    )
+                                }
+                                items(continueWatching, key = { "c" + it.uri }) { v ->
+                                    RecentCard(v, threshold) { PlayerActivity.start(context, listOf(v.uri), 0) }
+                                }
+                                item(span = { GridItemSpan(maxLineSpan) }) {
+                                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                                }
+                            }
                             if (recent.isNotEmpty()) {
                                 item(span = { GridItemSpan(maxLineSpan) }) {
                                     Text(
@@ -370,6 +391,20 @@ fun LibraryScreen(
                     } else {
                         // Compact mobile layout
                         LazyColumn(Modifier.fillMaxSize()) {
+                            if (continueWatching.isNotEmpty()) {
+                                item {
+                                    Text(
+                                        "이어보기",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                    )
+                                }
+                                items(continueWatching, key = { "c" + it.uri }) { v ->
+                                    RecentRow(v, threshold) { PlayerActivity.start(context, listOf(v.uri), 0) }
+                                }
+                                item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
+                            }
                             if (recent.isNotEmpty()) {
                                 item {
                                     Text(

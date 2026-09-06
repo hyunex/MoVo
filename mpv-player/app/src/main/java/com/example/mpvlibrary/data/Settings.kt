@@ -46,6 +46,12 @@ class SettingsRepo(private val context: Context) {
         val KEY_REMEMBER_BRIGHT = booleanPreferencesKey("remember_brightness")
         val KEY_SAVED_BRIGHT = doublePreferencesKey("saved_brightness")
         val KEY_AUTO_SUB = booleanPreferencesKey("auto_subtitle")
+        val KEY_SUB_FONT_SIZE = doublePreferencesKey("sub_font_size")
+        val KEY_SUB_COLOR = stringPreferencesKey("sub_color")
+
+        const val DEFAULT_SUB_FONT_SIZE = 55.0
+        const val DEFAULT_SUB_COLOR = "#FFFFFF"
+        val SUB_COLOR_PRESETS = listOf("#FFFFFF", "#FFFF00", "#00FFFF", "#00FF00", "#FF80C0")
 
         val DEFAULT_SPEED_PRESETS = listOf(0.5, 0.75, 1.0, 1.2, 1.25, 1.5, 1.75, 2.0)
         const val DEFAULT_VIDEO_ALIGN_Y = "-1"
@@ -133,6 +139,11 @@ class SettingsRepo(private val context: Context) {
     val rememberBrightness: Flow<Boolean> = context.dataStore.data.map { it[KEY_REMEMBER_BRIGHT] ?: false }
     val savedBrightness: Flow<Double> = context.dataStore.data.map { it[KEY_SAVED_BRIGHT] ?: -1.0 }
     val autoSubtitle: Flow<Boolean> = context.dataStore.data.map { it[KEY_AUTO_SUB] ?: true }
+    val subFontSize: Flow<Double> = context.dataStore.data.map { it[KEY_SUB_FONT_SIZE] ?: DEFAULT_SUB_FONT_SIZE }
+    val subColor: Flow<String> = context.dataStore.data.map { it[KEY_SUB_COLOR] ?: DEFAULT_SUB_COLOR }
+
+    suspend fun setSubFontSize(v: Double) { context.dataStore.edit { it[KEY_SUB_FONT_SIZE] = v } }
+    suspend fun setSubColor(v: String) { context.dataStore.edit { it[KEY_SUB_COLOR] = v } }
 
     suspend fun setTapSeekSec(v: Double) { context.dataStore.edit { it[KEY_TAP_SEEK] = v } }
     suspend fun setFastSpeed(v: Double) { context.dataStore.edit { it[KEY_FAST_SPEED] = v } }
