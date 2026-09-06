@@ -3,7 +3,12 @@ package com.example.mpvlibrary.ui
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.MediaMetadata
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
@@ -152,6 +157,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var subPlayables = mutableListOf<MpvPath.Playable>()
     private var noisyReceiver: android.content.BroadcastReceiver? = null
 
+    // Bluetooth / Car AV MediaSession & AudioFocus
+    private var mediaSession: MediaSession? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var resumeOnFocusGain = false
+
     // UI & Gesture controls
     private var controlsVisible by mutableStateOf(true)
     private var isLocked by mutableStateOf(false)
@@ -228,6 +238,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         settings = SettingsRepo(this)
         uris = intent.getStringArrayListExtra(EXTRA_URIS) ?: arrayListOf()
         index = intent.getIntExtra(EXTRA_INDEX, 0)
+        initMediaSession()
+        requestAudioFocus()
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -458,7 +470,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     private suspend fun playCurrent(view: MPVPlayerView) {
         val src = loadSource(index) ?: return
-        withContext(Dispatchers.Main) { view.playFile(src.path) }
+        withContext(Dispatchers.Main) {
+            view.playFile(src.path)
+            mpv("unpause on start") {
+                MPVLib.setPropertyBoolean("pause", false)
+            }
+            isPaused = false
+            updateMediaSessionMetadata()
+            updateMediaSessionState()
+        }
     }
 
     private suspend fun loadSource(i: Int): MpvPath.Playable? {
@@ -575,6 +595,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             MPVLib.setPropertyBoolean("pause", next)
         }
         showHud(HudMode.PLAY_PAUSE, if (next) "⏸ 일시정지" else "▶ 재생")
+        updateMediaSessionState()
         resetControlsTimer()
     }
 
@@ -585,7 +606,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         lifecycleScope.launch {
             val v = playerView ?: return@launch
             val src = loadSource(index) ?: return@launch
-            withContext(Dispatchers.Main) { v.playFile(src.path) }
+            withContext(Dispatchers.Main) {
+                v.playFile(src.path)
+                mpv("unpause on advance") {
+                    MPVLib.setPropertyBoolean("pause", false)
+                }
+                isPaused = false
+                updateMediaSessionMetadata()
+                updateMediaSessionState()
+            }
         }
         resetControlsTimer()
     }
@@ -594,20 +623,187 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         if (position > 3.0) {
             mpv("처음으로 이동") {
                 MPVLib.command(arrayOf("seek", "0", "absolute"))
+                MPVLib.setPropertyBoolean("pause", false)
                 position = 0.0
                 lastPosition = 0.0
+                isPaused = false
             }
             showHud(HudMode.SEEK, "처음부터 재생 (0:00)")
+            updateMediaSessionState()
         } else if (index > 0) {
             persistProgress(lastPosition, lastDuration)
             index -= 1
             lifecycleScope.launch {
                 val v = playerView ?: return@launch
                 val src = loadSource(index) ?: return@launch
-                withContext(Dispatchers.Main) { v.playFile(src.path) }
+                withContext(Dispatchers.Main) {
+                    v.playFile(src.path)
+                    mpv("unpause on previous") {
+                        MPVLib.setPropertyBoolean("pause", false)
+                    }
+                    isPaused = false
+                    updateMediaSessionMetadata()
+                    updateMediaSessionState()
+                }
             }
         }
         resetControlsTimer()
+    }
+
+    // ---------------------------------------------------------------- MediaSession & AudioFocus (Bluetooth / Car AV)
+
+    private fun initMediaSession() {
+        val session = MediaSession(this, "MoVo")
+        session.setCallback(object : MediaSession.Callback() {
+            override fun onPlay() {
+                AppLog.i(TAG, "MediaSession: onPlay (Bluetooth/Car command)")
+                runOnUiThread {
+                    if (isPaused) togglePlayPause()
+                }
+            }
+
+            override fun onPause() {
+                AppLog.i(TAG, "MediaSession: onPause (Bluetooth/Car command)")
+                runOnUiThread {
+                    if (!isPaused) togglePlayPause()
+                }
+            }
+
+            override fun onStop() {
+                AppLog.i(TAG, "MediaSession: onStop (Bluetooth/Car power off/stop)")
+                runOnUiThread {
+                    if (!isPaused) togglePlayPause()
+                }
+            }
+
+            override fun onSkipToNext() {
+                AppLog.i(TAG, "MediaSession: onSkipToNext")
+                runOnUiThread { advance() }
+            }
+
+            override fun onSkipToPrevious() {
+                AppLog.i(TAG, "MediaSession: onSkipToPrevious")
+                runOnUiThread { previous() }
+            }
+
+            override fun onSeekTo(pos: Long) {
+                val sec = (pos / 1000.0).coerceIn(0.0, duration.coerceAtLeast(1.0))
+                AppLog.i(TAG, "MediaSession: onSeekTo $sec")
+                runOnUiThread {
+                    mpv("seek mediaSession $sec") {
+                        MPVLib.command(arrayOf("seek", sec.toString(), "absolute"))
+                        position = sec
+                        lastPosition = sec
+                    }
+                    updateMediaSessionState()
+                }
+            }
+
+            override fun onFastForward() {
+                runOnUiThread { seekRelative(tapSeekSec) }
+            }
+
+            override fun onRewind() {
+                runOnUiThread { seekRelative(-tapSeekSec) }
+            }
+        })
+        session.isActive = true
+        mediaSession = session
+    }
+
+    private fun requestAudioFocus(): Boolean {
+        val playbackAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+            .build()
+
+        val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(playbackAttributes)
+            .setAcceptsDelayedFocusGain(true)
+            .setOnAudioFocusChangeListener { focusChange ->
+                when (focusChange) {
+                    AudioManager.AUDIOFOCUS_LOSS -> {
+                        AppLog.i(TAG, "AudioFocus LOSS -> pause (Car AV off / other audio start)")
+                        runOnUiThread {
+                            resumeOnFocusGain = false
+                            if (!isPaused && initialized) {
+                                togglePlayPause()
+                            }
+                        }
+                    }
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                        AppLog.i(TAG, "AudioFocus LOSS_TRANSIENT -> pause (phone call / speech)")
+                        runOnUiThread {
+                            if (!isPaused && initialized) {
+                                resumeOnFocusGain = true
+                                togglePlayPause()
+                            }
+                        }
+                    }
+                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                        AppLog.i(TAG, "AudioFocus LOSS_TRANSIENT_CAN_DUCK -> pause")
+                        runOnUiThread {
+                            if (!isPaused && initialized) {
+                                resumeOnFocusGain = true
+                                togglePlayPause()
+                            }
+                        }
+                    }
+                    AudioManager.AUDIOFOCUS_GAIN -> {
+                        AppLog.i(TAG, "AudioFocus GAIN -> resume=$resumeOnFocusGain")
+                        runOnUiThread {
+                            if (resumeOnFocusGain && isPaused && initialized) {
+                                resumeOnFocusGain = false
+                                togglePlayPause()
+                            }
+                        }
+                    }
+                }
+            }
+            .build()
+
+        val res = audioManager.requestAudioFocus(focusRequest)
+        audioFocusRequest = focusRequest
+        return res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    }
+
+    private fun abandonAudioFocus() {
+        runCatching {
+            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        }
+        audioFocusRequest = null
+    }
+
+    private fun updateMediaSessionState() {
+        val session = mediaSession ?: return
+        val playbackState = if (isPaused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING
+        val playbackSpeed = if (isPaused) 0f else speed.toFloat()
+        val actions = (
+            PlaybackState.ACTION_PLAY or
+            PlaybackState.ACTION_PAUSE or
+            PlaybackState.ACTION_PLAY_PAUSE or
+            PlaybackState.ACTION_STOP or
+            PlaybackState.ACTION_SKIP_TO_NEXT or
+            PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+            PlaybackState.ACTION_SEEK_TO or
+            PlaybackState.ACTION_FAST_FORWARD or
+            PlaybackState.ACTION_REWIND
+        )
+        val state = PlaybackState.Builder()
+            .setActions(actions)
+            .setState(playbackState, (position * 1000).toLong(), playbackSpeed)
+            .build()
+        session.setPlaybackState(state)
+    }
+
+    private fun updateMediaSessionMetadata() {
+        val session = mediaSession ?: return
+        val metadata = MediaMetadata.Builder()
+            .putString(MediaMetadata.METADATA_KEY_TITLE, videoTitle)
+            .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, videoTitle)
+            .putLong(MediaMetadata.METADATA_KEY_DURATION, (duration * 1000).toLong())
+            .build()
+        session.setMetadata(metadata)
     }
 
     private fun seekRelative(deltaSec: Double) {
@@ -1872,12 +2068,35 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         try {
             AppLog.i(TAG, "mpv event id=$eventId")
             if (eventId == MPVLib.MpvEvent.MPV_EVENT_END_FILE) {
+                AppLog.i(TAG, "end of file reached (index=$index, autoAdvance=$autoAdvance, repeatOne=$repeatOne)")
                 persistProgress(lastPosition, lastDuration)
-                if (autoAdvance) runOnUiThread { advance() }
+                if (repeatOne) {
+                    runOnUiThread {
+                        mpv("repeat current file") {
+                            MPVLib.command(arrayOf("seek", "0", "absolute"))
+                            MPVLib.setPropertyBoolean("pause", false)
+                            position = 0.0
+                            lastPosition = 0.0
+                            isPaused = false
+                            updateMediaSessionState()
+                        }
+                    }
+                } else if (autoAdvance && index < uris.size - 1) {
+                    runOnUiThread { advance() }
+                } else {
+                    runOnUiThread {
+                        isPaused = true
+                        updateMediaSessionState()
+                    }
+                }
             }
             if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
                 AppLog.i(TAG, "file loaded (pos=${lastPosition.toInt()}s)")
-                runOnUiThread { refreshTracks() }
+                runOnUiThread {
+                    refreshTracks()
+                    updateMediaSessionMetadata()
+                    updateMediaSessionState()
+                }
                 autoLoadSubtitles()
             }
         } catch (e: Exception) {
@@ -1909,6 +2128,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         subPlayables.clear()
         runCatching { noisyReceiver?.let { unregisterReceiver(it) } }
         noisyReceiver = null
+        abandonAudioFocus()
+        mediaSession?.isActive = false
+        mediaSession?.release()
+        mediaSession = null
         if (initialized) {
             runCatching {
                 MPVLib.removeObserver(this)

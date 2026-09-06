@@ -29,6 +29,9 @@ interface VideoDao {
     @Query("SELECT * FROM videos WHERE folderId = :folderId")
     fun observeFolder(folderId: Long): Flow<List<VideoEntity>>
 
+    @Query("SELECT * FROM videos WHERE folderId = :folderId")
+    suspend fun forFolder(folderId: Long): List<VideoEntity>
+
     @Query("SELECT * FROM videos")
     suspend fun all(): List<VideoEntity>
 

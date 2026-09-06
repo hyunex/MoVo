@@ -42,7 +42,8 @@ class MPVPlayerView @JvmOverloads constructor(
             MPVLib.setOptionString("msg-level", "all=warn")
             MPVLib.init()
             MPVLib.setOptionString("force-window", "no")
-            MPVLib.setOptionString("idle", "once")
+            MPVLib.setOptionString("idle", "yes")
+            MPVLib.setOptionString("keep-open", "no")
             mpvReady = true
             AppLog.i("mpv", "player initialized (config=$configDir)")
             tryAttach()

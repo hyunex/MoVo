@@ -293,6 +293,17 @@ fun LibraryScreen(
         recent.filter { it.positionSec > 0 && !it.isWatched(threshold) }.take(6)
     }
 
+    val playVideoWithFolderContext: (VideoEntity) -> Unit = { v ->
+        scope.launch(Dispatchers.IO) {
+            val folderVideos = db.videos().forFolder(v.folderId).sortedBy { naturalKey(it.name) }
+            val uris = folderVideos.map { it.uri }.ifEmpty { listOf(v.uri) }
+            val idx = uris.indexOf(v.uri).coerceAtLeast(0)
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                PlayerActivity.start(context, uris, idx)
+            }
+        }
+    }
+
     AppScaffold(
         title = "MoVo",
         onBack = null,
@@ -347,7 +358,7 @@ fun LibraryScreen(
                                     )
                                 }
                                 items(continueWatching, key = { "c" + it.uri }) { v ->
-                                    RecentCard(v, threshold) { PlayerActivity.start(context, listOf(v.uri), 0) }
+                                    RecentCard(v, threshold) { playVideoWithFolderContext(v) }
                                 }
                                 item(span = { GridItemSpan(maxLineSpan) }) {
                                     HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -363,7 +374,7 @@ fun LibraryScreen(
                                     )
                                 }
                                 items(recent.take(6), key = { "r" + it.uri }) { v ->
-                                    RecentCard(v, threshold) { PlayerActivity.start(context, listOf(v.uri), 0) }
+                                    RecentCard(v, threshold) { playVideoWithFolderContext(v) }
                                 }
                                 item(span = { GridItemSpan(maxLineSpan) }) {
                                     HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -401,7 +412,7 @@ fun LibraryScreen(
                                     )
                                 }
                                 items(continueWatching, key = { "c" + it.uri }) { v ->
-                                    RecentRow(v, threshold) { PlayerActivity.start(context, listOf(v.uri), 0) }
+                                    RecentRow(v, threshold) { playVideoWithFolderContext(v) }
                                 }
                                 item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
                             }
@@ -415,7 +426,7 @@ fun LibraryScreen(
                                     )
                                 }
                                 items(recent.take(6), key = { "r" + it.uri }) { v ->
-                                    RecentRow(v, threshold) { PlayerActivity.start(context, listOf(v.uri), 0) }
+                                    RecentRow(v, threshold) { playVideoWithFolderContext(v) }
                                 }
                                 item { HorizontalDivider(Modifier.padding(vertical = 8.dp)) }
                             }
