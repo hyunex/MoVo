@@ -663,6 +663,12 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                         }) {
                             Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
                         }
+                        IconButton(onClick = {
+                            deleteTargetUris = selectedUris.toList()
+                            showDeleteDialog = true
+                        }) {
+                            Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
+                        }
                         var showBatchMenu by remember { mutableStateOf(false) }
                         Box {
                             IconButton(onClick = { showBatchMenu = true }) {
@@ -925,22 +931,75 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                     onClick = {
                         val targets = deleteTargetUris
                         scope.launch(Dispatchers.IO) {
+                            var deletedCount = 0
+                            var failedCount = 0
                             targets.forEach { u ->
                                 val parsed = Uri.parse(u)
-                                val viaDoc = runCatching {
-                                    DocumentFile.fromSingleUri(context, parsed)?.delete() == true
-                                }.getOrDefault(false)
-                                val viaContract = if (!viaDoc) {
-                                    runCatching {
+                                folder?.let { f ->
+                                    LibraryScanner.takePermission(context, Uri.parse(f.treeUri))
+                                }
+                                var success = false
+                                val resolved = com.example.mpvlibrary.mpv.MpvPath.resolveFile(u)
+                                if (resolved != null && resolved.exists()) {
+                                    val fSuccess = runCatching { resolved.delete() }.getOrDefault(false)
+                                    if (fSuccess) {
+                                        success = true
+                                        AppLog.i("library", "file deleted via File.delete: ${resolved.absolutePath}")
+                                    }
+                                }
+                                if (!success) {
+                                    val contractRes = runCatching {
                                         android.provider.DocumentsContract.deleteDocument(context.contentResolver, parsed)
-                                        true
-                                    }.getOrDefault(false)
-                                } else true
-                                if (!viaDoc && !viaContract) {
-                                    AppLog.w("library", "file delete failed, unregistering only")
+                                    }
+                                    if (contractRes.isSuccess && contractRes.getOrNull() == true) {
+                                        success = true
+                                    }
+                                }
+                                if (!success) {
+                                    val docRes = runCatching {
+                                        DocumentFile.fromSingleUri(context, parsed)?.delete() == true
+                                    }
+                                    if (docRes.isSuccess && docRes.getOrNull() == true) {
+                                        success = true
+                                    }
+                                }
+                                if (!success) {
+                                    val treeRes = runCatching {
+                                        folder?.let { f ->
+                                            val root = DocumentFile.fromTreeUri(context, Uri.parse(f.treeUri))
+                                            val entity = db.videos().byUri(u)
+                                            if (entity != null && root != null) {
+                                                var dir: DocumentFile? = root
+                                                if (entity.dirPath.isNotEmpty()) {
+                                                    for (seg in entity.dirPath.split('/')) {
+                                                        dir = dir?.findFile(seg) ?: dir
+                                                    }
+                                                }
+                                                dir?.findFile(entity.name)?.delete() == true
+                                            } else false
+                                        } == true
+                                    }
+                                    if (treeRes.isSuccess && treeRes.getOrNull() == true) {
+                                        success = true
+                                    }
+                                }
+                                if (success) {
+                                    deletedCount++
+                                    AppLog.i("library", "file physically deleted: $u")
+                                } else {
+                                    failedCount++
+                                    AppLog.w("library", "file physical delete failed: $u")
                                 }
                             }
                             db.videos().deleteByUris(targets)
+                            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                val msg = if (failedCount > 0) {
+                                    "${deletedCount}개 삭제 완료 (${failedCount}개 실패)"
+                                } else {
+                                    "${deletedCount}개의 동영상이 삭제되었습니다."
+                                }
+                                android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                            }
                         }
                         selectedUris = selectedUris - targets.toSet()
                         showDeleteDialog = false

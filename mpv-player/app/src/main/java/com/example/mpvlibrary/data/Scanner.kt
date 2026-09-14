@@ -3,7 +3,6 @@ package com.example.mpvlibrary.data
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,17 +22,28 @@ class LibraryScanner(private val context: Context) {
             name.substringAfterLast('.', "").lowercase() in VIDEO_EXTENSIONS
 
         fun takePermission(context: Context, treeUri: Uri) {
-            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             runCatching {
                 context.contentResolver.takePersistableUriPermission(treeUri, flags)
+            }.onFailure {
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
             }
         }
 
         fun releasePermission(context: Context, treeUri: Uri) {
+            val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             runCatching {
-                context.contentResolver.releasePersistableUriPermission(
-                    treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                )
+                context.contentResolver.releasePersistableUriPermission(treeUri, flags)
+            }.onFailure {
+                runCatching {
+                    context.contentResolver.releasePersistableUriPermission(
+                        treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
             }
         }
 
@@ -56,7 +66,14 @@ class LibraryScanner(private val context: Context) {
 
     suspend fun scanAll() = withContext(Dispatchers.IO) {
         AppLog.i("library", "scan started")
-        for (f in db.folders().all()) scan(f)
+        for (f in db.folders().all()) {
+            val u = runCatching { Uri.parse(f.treeUri) }.getOrNull()
+            if (u != null) {
+                // Ensure write permission is held for file deletion
+                takePermission(context, u)
+            }
+            scan(f)
+        }
         AppLog.i("library", "scan finished")
     }
 

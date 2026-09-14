@@ -135,4 +135,26 @@ object MpvPath {
             }
         }
     }
+
+    /**
+     * Resolve a real filesystem File from a content: or file: URI if on primary storage.
+     */
+    fun resolveFile(uriStr: String): File? {
+        if (uriStr.startsWith("file://")) {
+            return runCatching { File(Uri.parse(uriStr).path ?: "") }.getOrNull()?.takeIf { it.exists() }
+        }
+        val decoded = runCatching { Uri.decode(uriStr) }.getOrNull() ?: return null
+        val rel = when {
+            decoded.contains("document/primary:") -> decoded.substringAfter("document/primary:")
+            decoded.contains("primary:") -> decoded.substringAfter("primary:")
+            else -> null
+        }
+        if (rel != null) {
+            val f = File("/storage/emulated/0", rel)
+            if (f.exists()) return f
+            val fSdcard = File("/sdcard", rel)
+            if (fSdcard.exists()) return fSdcard
+        }
+        return null
+    }
 }
