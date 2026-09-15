@@ -11,7 +11,10 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.Settings
 import androidx.activity.result.IntentSenderRequest
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
@@ -312,6 +315,19 @@ fun LibraryScreen(
     var threshold by remember { mutableStateOf(0.9) }
     var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
     var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
+    var showStartupPermDialog by remember { mutableStateOf(!MainActivity.hasAllFilesAccess(context)) }
+
+    // Re-check permission whenever app returns to foreground (ON_RESUME)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                showStartupPermDialog = !MainActivity.hasAllFilesAccess(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(Unit) {
         val s = SettingsRepo(context)
@@ -513,6 +529,31 @@ fun LibraryScreen(
                 }
             }
         }
+    }
+
+    if (showStartupPermDialog) {
+        AlertDialog(
+            onDismissRequest = { showStartupPermDialog = false },
+            icon = { Icon(Icons.Default.FolderShared, null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("파일 관리 권한 허용 안내") },
+            text = {
+                Text(
+                    "동영상 재생 및 라이브러리 관리, 파일 삭제 기능을 위해 '모든 파일에 대한 접근' 권한 허용이 필요합니다.\n\n[권한 허용하기]를 눌러 설정 화면에서 MoVo의 권한을 직접 허용해 주세요."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    MainActivity.requestAllFilesAccess(context)
+                }) {
+                    Text("권한 허용하기")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showStartupPermDialog = false }) {
+                    Text("나중에")
+                }
+            },
+        )
     }
 }
 
@@ -1537,64 +1578,6 @@ fun SettingsScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item { Spacer(Modifier.height(4.dp)) }
-
-            // 0. 저장공간 및 파일 관리 권한
-            item {
-                val hasPerm = MainActivity.hasAllFilesAccess(context)
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                ) {
-                    Column(Modifier.padding(16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.FolderShared, null, tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(8.dp))
-                            Text("저장공간 및 파일 관리 권한", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        }
-                        Text(
-                            "다운로드(Download) 등 외부 앱이 생성한 폴더의 동영상을 기기에서 완전히 삭제하려면 '모든 파일에 대한 접근' 권한이 필요합니다.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray,
-                            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
-                        )
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            if (hasPerm) {
-                                SuggestionChip(
-                                    onClick = {},
-                                    label = { Text("✓ 모든 파일 관리 권한 허용됨", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold) },
-                                    colors = SuggestionChipDefaults.suggestionChipColors(containerColor = Color(0xFF2E7D32).copy(alpha = 0.12f)),
-                                    border = null,
-                                )
-                            } else {
-                                SuggestionChip(
-                                    onClick = { MainActivity.requestAllFilesAccess(context) },
-                                    label = { Text("⚠️ 모든 파일 관리 권한 필요", color = Color(0xFFE65100), fontWeight = FontWeight.Bold) },
-                                    colors = SuggestionChipDefaults.suggestionChipColors(containerColor = Color(0xFFE65100).copy(alpha = 0.12f)),
-                                    border = null,
-                                )
-                            }
-                        }
-
-                        if (!hasPerm) {
-                            Spacer(Modifier.height(10.dp))
-                            Button(
-                                onClick = { MainActivity.requestAllFilesAccess(context) },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(10.dp),
-                            ) {
-                                Icon(Icons.Default.Security, null)
-                                Spacer(Modifier.width(8.dp))
-                                Text("모든 파일 관리 권한 허용하기")
-                            }
-                        }
-                    }
-                }
-            }
 
             // 1. 재생 속도 프리셋 커스텀 관리
             item {
