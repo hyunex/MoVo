@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -263,11 +264,16 @@ fun LibraryScreen(
     var folders by remember { mutableStateOf<List<FolderEntity>>(emptyList()) }
     var recent by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
     var threshold by remember { mutableStateOf(0.9) }
+    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
+    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
 
     LaunchedEffect(Unit) {
-        threshold = SettingsRepo(context).watchedThreshold.first()
+        val s = SettingsRepo(context)
+        threshold = s.watchedThreshold.first()
         launch(Dispatchers.IO) { db.folders().observeAll().collect { folders = it } }
         launch(Dispatchers.IO) { db.videos().observeRecent(10).collect { recent = it } }
+        launch(Dispatchers.IO) { s.gridColumnsTablet.collect { gridColumnsTablet = it } }
+        launch(Dispatchers.IO) { s.gridColumnsPhone.collect { gridColumnsPhone = it } }
     }
 
     val picker = rememberLauncherForActivityResult(
@@ -331,6 +337,9 @@ fun LibraryScreen(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     onRefresh = { scanner.scanAll() },
                 ) {
+                    val useGrid = isWide || gridColumnsPhone > 1
+                    val colCount = if (isWide) gridColumnsTablet else gridColumnsPhone
+
                     if (folders.isEmpty()) {
                         Box(
                             Modifier
@@ -340,10 +349,10 @@ fun LibraryScreen(
                         ) {
                             Text("영상 폴더를 등록하세요", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
                         }
-                    } else if (isWide) {
-                        // Wide screen / Foldable inner / Tablet layout
+                    } else if (useGrid) {
+                        // Wide screen / Foldable inner / Tablet layout (or phone grid)
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(minSize = 300.dp),
+                            columns = GridCells.Fixed(colCount),
                             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -439,14 +448,19 @@ fun LibraryScreen(
                                 )
                             }
                             items(folders, key = { it.id }) { f ->
-                                FolderCard(f, onOpen = { onOpenFolder(f.id) }, onDelete = {
+                                FolderCard(
+                                    f,
+                                    onOpen = { onOpenFolder(f.id) },
+                                    onDelete = {
                                     scope.launch(Dispatchers.IO) {
                                         val folder = db.folders().byId(f.id)
                                         db.folders().delete(f.id)
                                         db.videos().deleteForFolder(f.id)
                                         folder?.let { runCatching { LibraryScanner.releasePermission(context, Uri.parse(it.treeUri)) } }
                                     }
-                                })
+                                },
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                                )
                             }
                         }
                     }
@@ -457,7 +471,12 @@ fun LibraryScreen(
 }
 
 @Composable
-fun FolderCard(f: FolderEntity, onOpen: () -> Unit, onDelete: () -> Unit) {
+fun FolderCard(
+    f: FolderEntity,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+) {
     val context = LocalContext.current
     val db = remember { AppDb.get(context) }
     var count by remember { mutableStateOf(0) }
@@ -473,7 +492,7 @@ fun FolderCard(f: FolderEntity, onOpen: () -> Unit, onDelete: () -> Unit) {
 
     Card(
         onClick = onOpen,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        modifier = modifier,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         shape = RoundedCornerShape(12.dp),
     ) {
@@ -598,10 +617,16 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
     BackHandler(enabled = inSelectionMode) {
         selectedUris = emptySet()
     }
+    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
+    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
+
     LaunchedEffect(folderId) {
-        threshold = SettingsRepo(context).watchedThreshold.first()
+        val s = SettingsRepo(context)
+        threshold = s.watchedThreshold.first()
         launch(Dispatchers.IO) { folder = db.folders().byId(folderId) }
         launch(Dispatchers.IO) { db.videos().observeFolder(folderId).collect { videos = it } }
+        launch(Dispatchers.IO) { s.gridColumnsTablet.collect { gridColumnsTablet = it } }
+        launch(Dispatchers.IO) { s.gridColumnsPhone.collect { gridColumnsPhone = it } }
     }
 
     val title = folder?.displayName ?: "…"
@@ -781,14 +806,17 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                     )
                 }
 
-                if (isWide) {
-                    // Wide adaptive grid
+                val useGrid = isWide || gridColumnsPhone > 1
+                val colCount = if (isWide) gridColumnsTablet else gridColumnsPhone
+
+                if (useGrid) {
+                    // Wide adaptive grid or phone grid
                     PullRefreshWrapper(
                         modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
                         onRefresh = { scanner.scanAll() },
                     ) {
                     LazyVerticalGrid(
-                        columns = GridCells.Adaptive(minSize = 320.dp),
+                        columns = GridCells.Fixed(colCount),
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1294,6 +1322,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     var fastSpeed by remember { mutableStateOf(2.0) }
     var rememberBright by remember { mutableStateOf(false) }
     var autoSub by remember { mutableStateOf(true) }
+    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
+    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
 
     // UI state for inputs & modals
     var newSpeedInput by remember { mutableStateOf("") }
@@ -1312,6 +1342,8 @@ fun SettingsScreen(onBack: () -> Unit) {
         fastSpeed = settings.fastSpeed.first()
         rememberBright = settings.rememberBrightness.first()
         autoSub = settings.autoSubtitle.first()
+        gridColumnsTablet = settings.gridColumnsTablet.first()
+        gridColumnsPhone = settings.gridColumnsPhone.first()
         loaded = true
     }
     if (!loaded) return
@@ -1450,6 +1482,67 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 }
                             }) {
                                 Text("기본 프리셋 복원", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 화면별 그리드 열 수 (크기 조절)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.GridView, null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Text("화면별 그리드 열 수 (크기 조절)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            "폴더블이나 태블릿 대화면에서 카드가 너무 크게 표시되지 않도록 가로 열 개수를 조절합니다. (세로는 16:9 비율에 맞춰 자동 조정)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                        )
+
+                        Text("대화면 / 태블릿 / 폴더블 가로 열 수", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        ) {
+                            listOf(2, 3, 4, 5, 6).forEach { cols ->
+                                FilterChip(
+                                    selected = gridColumnsTablet == cols,
+                                    onClick = {
+                                        gridColumnsTablet = cols
+                                        scope.launch { settings.setGridColumnsTablet(cols) }
+                                    },
+                                    label = { Text("${cols}열" + if (cols == 4) " (추천)" else "") },
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(14.dp))
+
+                        Text("스마트폰 세로 모드 목록 형태", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        ) {
+                            listOf(1 to "1열 (상세 목록)", 2 to "2열 그리드", 3 to "3열 그리드").forEach { (cols, label) ->
+                                FilterChip(
+                                    selected = gridColumnsPhone == cols,
+                                    onClick = {
+                                        gridColumnsPhone = cols
+                                        scope.launch { settings.setGridColumnsPhone(cols) }
+                                    },
+                                    label = { Text(label) },
+                                )
                             }
                         }
                     }
