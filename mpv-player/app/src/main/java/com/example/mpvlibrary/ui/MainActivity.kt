@@ -1,6 +1,17 @@
 package com.example.mpvlibrary.ui
 
+import android.Manifest
+import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.MediaScannerConnection
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.provider.Settings
+import androidx.activity.result.IntentSenderRequest
+import androidx.core.content.ContextCompat
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
@@ -66,6 +77,41 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        fun hasAllFilesAccess(context: Context): Boolean {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Environment.isExternalStorageManager()
+            } else {
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) == PackageManager.PERMISSION_GRANTED
+            }
+        }
+
+        fun requestAllFilesAccess(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:" + context.packageName)
+                }
+                runCatching { context.startActivity(intent) }.onFailure {
+                    val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    runCatching { context.startActivity(fallback) }.onFailure {
+                        val appSettings = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.parse("package:" + context.packageName)
+                        }
+                        context.startActivity(appSettings)
+                    }
+                }
+            } else {
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:" + context.packageName)
+                }
+                context.startActivity(intent)
+            }
+        }
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -612,6 +658,28 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
     val inSelectionMode = selectedUris.isNotEmpty()
     var showDeleteDialog by remember { mutableStateOf(false) }
     var deleteTargetUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    var showAllFilesPermDialog by remember { mutableStateOf(false) }
+    var pendingMediaStoreDeleteUris by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    val mediaStoreDeleteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val toRemove = pendingMediaStoreDeleteUris
+            pendingMediaStoreDeleteUris = emptyList()
+            scope.launch(Dispatchers.IO) {
+                db.videos().deleteByUris(toRemove)
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        context,
+                        "${toRemove.size}개의 동영상이 삭제되었습니다.",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+            selectedUris = selectedUris - toRemove.toSet()
+        }
+    }
 
 
     BackHandler(enabled = inSelectionMode) {
@@ -950,17 +1018,42 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
             onDismissRequest = { showDeleteDialog = false; deleteTargetUris = emptyList() },
             title = { Text("동영상 삭제") },
             text = {
-                Text(
-                    "${deleteTargetUris.size}개의 동영상을 라이브러리 및 저장공간에서 완전히 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
-                )
+                Column {
+                    Text(
+                        "${deleteTargetUris.size}개의 동영상을 라이브러리 및 저장공간에서 완전히 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
+                    )
+                    if (!MainActivity.hasAllFilesAccess(context)) {
+                        Spacer(Modifier.height(10.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "현재 '모든 파일 관리 권한'이 비활성화되어 있어 Download 등 외부 폴더 파일의 실제 삭제가 실패할 수 있습니다. 설정에서 권한 허용이 권장됩니다.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
+                        }
+                    }
+                }
             },
             confirmButton = {
                 Button(
                     onClick = {
                         val targets = deleteTargetUris
+                        showDeleteDialog = false
+                        deleteTargetUris = emptyList()
                         scope.launch(Dispatchers.IO) {
                             var deletedCount = 0
                             var failedCount = 0
+                            val failedUris = mutableListOf<String>()
+                            val mediaStoreCandidates = mutableListOf<Pair<String, Uri>>()
+
                             targets.forEach { u ->
                                 val parsed = Uri.parse(u)
                                 folder?.let { f ->
@@ -968,11 +1061,17 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                                 }
                                 var success = false
                                 val resolved = com.example.mpvlibrary.mpv.MpvPath.resolveFile(u)
-                                if (resolved != null && resolved.exists()) {
+                                if (resolved != null) {
                                     val fSuccess = runCatching { resolved.delete() }.getOrDefault(false)
                                     if (fSuccess) {
                                         success = true
+                                        MediaScannerConnection.scanFile(context, arrayOf(resolved.absolutePath), null, null)
                                         AppLog.i("library", "file deleted via File.delete: ${resolved.absolutePath}")
+                                    } else {
+                                        val mUri = com.example.mpvlibrary.mpv.MpvPath.getMediaStoreUri(context, resolved.absolutePath)
+                                        if (mUri != null) {
+                                            mediaStoreCandidates.add(u to mUri)
+                                        }
                                     }
                                 }
                                 if (!success) {
@@ -981,6 +1080,9 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                                     }
                                     if (contractRes.isSuccess && contractRes.getOrNull() == true) {
                                         success = true
+                                        if (resolved != null) {
+                                            MediaScannerConnection.scanFile(context, arrayOf(resolved.absolutePath), null, null)
+                                        }
                                     }
                                 }
                                 if (!success) {
@@ -989,6 +1091,9 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                                     }
                                     if (docRes.isSuccess && docRes.getOrNull() == true) {
                                         success = true
+                                        if (resolved != null) {
+                                            MediaScannerConnection.scanFile(context, arrayOf(resolved.absolutePath), null, null)
+                                        }
                                     }
                                 }
                                 if (!success) {
@@ -1009,6 +1114,9 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                                     }
                                     if (treeRes.isSuccess && treeRes.getOrNull() == true) {
                                         success = true
+                                        if (resolved != null) {
+                                            MediaScannerConnection.scanFile(context, arrayOf(resolved.absolutePath), null, null)
+                                        }
                                     }
                                 }
                                 if (success) {
@@ -1016,22 +1124,55 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                                     AppLog.i("library", "file physically deleted: $u")
                                 } else {
                                     failedCount++
+                                    failedUris.add(u)
                                     AppLog.w("library", "file physical delete failed: $u")
                                 }
                             }
-                            db.videos().deleteByUris(targets)
-                            kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                val msg = if (failedCount > 0) {
-                                    "${deletedCount}개 삭제 완료 (${failedCount}개 실패)"
-                                } else {
-                                    "${deletedCount}개의 동영상이 삭제되었습니다."
+
+                            val successfullyDeleted = targets - failedUris.toSet()
+                            if (successfullyDeleted.isNotEmpty()) {
+                                db.videos().deleteByUris(successfullyDeleted)
+                                selectedUris = selectedUris - successfullyDeleted.toSet()
+                            }
+
+                            if (failedCount > 0) {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && mediaStoreCandidates.isNotEmpty()) {
+                                    val candidateVideoUris = mediaStoreCandidates.map { it.first }
+                                    val candidateMediaUris = mediaStoreCandidates.map { it.second }
+                                    val pi = runCatching {
+                                        MediaStore.createDeleteRequest(context.contentResolver, candidateMediaUris)
+                                    }.getOrNull()
+                                    if (pi != null) {
+                                        pendingMediaStoreDeleteUris = candidateVideoUris
+                                        val isr = IntentSenderRequest.Builder(pi.intentSender).build()
+                                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                            mediaStoreDeleteLauncher.launch(isr)
+                                        }
+                                        return@launch
+                                    }
                                 }
-                                android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+
+                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                    if (!MainActivity.hasAllFilesAccess(context)) {
+                                        showAllFilesPermDialog = true
+                                    } else {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "${deletedCount}개 삭제 완료 (${failedCount}개 실패: 파일 쓰기 권한 필요)",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            } else {
+                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "${deletedCount}개의 동영상이 삭제되었습니다.",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
                             }
                         }
-                        selectedUris = selectedUris - targets.toSet()
-                        showDeleteDialog = false
-                        deleteTargetUris = emptyList()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                 ) {
@@ -1041,6 +1182,32 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
             dismissButton = {
                 TextButton(onClick = { showDeleteDialog = false; deleteTargetUris = emptyList() }) {
                     Text("취소")
+                }
+            },
+        )
+    }
+
+    if (showAllFilesPermDialog) {
+        AlertDialog(
+            onDismissRequest = { showAllFilesPermDialog = false },
+            icon = { Icon(Icons.Default.Security, null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("동영상 파일 삭제 권한 필요") },
+            text = {
+                Text(
+                    "다운로드(Download) 등 외부 폴더의 실제 동영상 파일을 삭제하려면 안드로이드 보안 정책상 '모든 파일에 대한 접근' 권한 허용이 필요합니다.\n\n설정 화면으로 이동하여 MoVo의 권한을 허용하시겠습니까?"
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showAllFilesPermDialog = false
+                    MainActivity.requestAllFilesAccess(context)
+                }) {
+                    Text("권한 설정으로 이동")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAllFilesPermDialog = false }) {
+                    Text("닫기")
                 }
             },
         )
@@ -1370,6 +1537,64 @@ fun SettingsScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             item { Spacer(Modifier.height(4.dp)) }
+
+            // 0. 저장공간 및 파일 관리 권한
+            item {
+                val hasPerm = MainActivity.hasAllFilesAccess(context)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.FolderShared, null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Text("저장공간 및 파일 관리 권한", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            "다운로드(Download) 등 외부 앱이 생성한 폴더의 동영상을 기기에서 완전히 삭제하려면 '모든 파일에 대한 접근' 권한이 필요합니다.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                        )
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            if (hasPerm) {
+                                SuggestionChip(
+                                    onClick = {},
+                                    label = { Text("✓ 모든 파일 관리 권한 허용됨", color = Color(0xFF2E7D32), fontWeight = FontWeight.Bold) },
+                                    colors = SuggestionChipDefaults.suggestionChipColors(containerColor = Color(0xFF2E7D32).copy(alpha = 0.12f)),
+                                    border = null,
+                                )
+                            } else {
+                                SuggestionChip(
+                                    onClick = { MainActivity.requestAllFilesAccess(context) },
+                                    label = { Text("⚠️ 모든 파일 관리 권한 필요", color = Color(0xFFE65100), fontWeight = FontWeight.Bold) },
+                                    colors = SuggestionChipDefaults.suggestionChipColors(containerColor = Color(0xFFE65100).copy(alpha = 0.12f)),
+                                    border = null,
+                                )
+                            }
+                        }
+
+                        if (!hasPerm) {
+                            Spacer(Modifier.height(10.dp))
+                            Button(
+                                onClick = { MainActivity.requestAllFilesAccess(context) },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Icon(Icons.Default.Security, null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("모든 파일 관리 권한 허용하기")
+                            }
+                        }
+                    }
+                }
+            }
 
             // 1. 재생 속도 프리셋 커스텀 관리
             item {

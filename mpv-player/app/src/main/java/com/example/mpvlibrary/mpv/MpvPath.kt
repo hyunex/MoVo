@@ -137,24 +137,55 @@ object MpvPath {
     }
 
     /**
-     * Resolve a real filesystem File from a content: or file: URI if on primary storage.
+     * Resolve a real filesystem File from a content: or file: URI.
+     * Returns candidate File even if exists() is currently blocked by permission checks.
      */
     fun resolveFile(uriStr: String): File? {
         if (uriStr.startsWith("file://")) {
-            return runCatching { File(Uri.parse(uriStr).path ?: "") }.getOrNull()?.takeIf { it.exists() }
+            return runCatching { File(Uri.parse(uriStr).path ?: "") }.getOrNull()
         }
         val decoded = runCatching { Uri.decode(uriStr) }.getOrNull() ?: return null
         val rel = when {
             decoded.contains("document/primary:") -> decoded.substringAfter("document/primary:")
             decoded.contains("primary:") -> decoded.substringAfter("primary:")
-            else -> null
+            else -> {
+                val docPart = decoded.substringAfter("document/", "")
+                if (docPart.contains(":")) {
+                    val vol = docPart.substringBefore(":")
+                    val sub = docPart.substringAfter(":")
+                    if (vol == "primary") sub else null
+                } else null
+            }
         }
         if (rel != null) {
             val f = File("/storage/emulated/0", rel)
             if (f.exists()) return f
             val fSdcard = File("/sdcard", rel)
             if (fSdcard.exists()) return fSdcard
+            return f
         }
         return null
+    }
+
+    /**
+     * Query MediaStore to locate the content URI for a given absolute filesystem path.
+     */
+    fun getMediaStoreUri(context: Context, path: String): Uri? {
+        val proj = arrayOf(android.provider.MediaStore.Video.Media._ID)
+        val sel = "${android.provider.MediaStore.Video.Media.DATA} = ?"
+        val args = arrayOf(path)
+        return runCatching {
+            context.contentResolver.query(
+                android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                proj, sel, args, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(0)
+                    android.content.ContentUris.withAppendedId(
+                        android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id
+                    )
+                } else null
+            }
+        }.getOrNull()
     }
 }
