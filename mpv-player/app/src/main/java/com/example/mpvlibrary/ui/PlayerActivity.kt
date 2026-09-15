@@ -81,9 +81,9 @@ enum class AspectRatioMode(val title: String, val shortTitle: String) {
 }
 
 enum class ScreenRotationMode(val label: String) {
-    SENSOR("자동 회전 (센서)"),
-    LANDSCAPE("가로 모드 고정"),
-    PORTRAIT("세로 모드 고정");
+    SENSOR("자동 회전 (4방향 전체 센서)"),
+    LANDSCAPE("가로 모드 (양방향 센서)"),
+    PORTRAIT("세로 모드 (양방향 센서)");
 }
 
 enum class HudMode {
@@ -211,6 +211,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         AppLog.install(this)
         AppLog.i(TAG, "PlayerActivity created (items=${intent.getStringArrayListExtra(EXTRA_URIS)?.size ?: 0})")
         index = intent.getIntExtra(EXTRA_INDEX, 0)
@@ -873,9 +874,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         }
         rotationMode = next
         requestedOrientation = when (next) {
-            ScreenRotationMode.SENSOR -> ActivityInfo.SCREEN_ORIENTATION_SENSOR
-            ScreenRotationMode.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-            ScreenRotationMode.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            ScreenRotationMode.SENSOR -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+            ScreenRotationMode.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            ScreenRotationMode.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         }
         showHud(HudMode.ASPECT, "화면 회전: ${next.label}")
         resetControlsTimer()
