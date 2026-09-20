@@ -67,6 +67,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
@@ -364,6 +365,11 @@ fun LibraryScreen(
     var recent by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
     var threshold by remember { mutableStateOf(0.9) }
     var showStartupPermDialog by remember { mutableStateOf(!MainActivity.hasAllFilesAccess(context)) }
+    var videoViewMode by remember { mutableStateOf("list") }
+    var wideViewMode by remember { mutableStateOf("list") }
+    var thumbScale by remember { mutableStateOf("medium") }
+    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
+    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
 
     // Re-check permission whenever app returns to foreground (ON_RESUME)
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -392,8 +398,18 @@ fun LibraryScreen(
     LaunchedEffect(Unit) {
         val s = SettingsRepo(context)
         threshold = s.watchedThreshold.first()
+        videoViewMode = s.videoViewMode.first()
+        wideViewMode = s.wideViewMode.first()
+        thumbScale = s.thumbScale.first()
+        gridColumnsPhone = s.gridColumnsPhone.first()
+        gridColumnsTablet = s.gridColumnsTablet.first()
         launch(Dispatchers.IO) { db.folders().observeAll().collect { folders = it } }
         launch(Dispatchers.IO) { db.videos().observeRecent(10).collect { recent = it } }
+        launch(Dispatchers.IO) { s.videoViewMode.collect { videoViewMode = it } }
+        launch(Dispatchers.IO) { s.wideViewMode.collect { wideViewMode = it } }
+        launch(Dispatchers.IO) { s.thumbScale.collect { thumbScale = it } }
+        launch(Dispatchers.IO) { s.gridColumnsPhone.collect { gridColumnsPhone = it } }
+        launch(Dispatchers.IO) { s.gridColumnsTablet.collect { gridColumnsTablet = it } }
     }
 
     // Keep selection valid: default to 이어보기, drop removed folders, reset stale sub-paths.
@@ -552,6 +568,13 @@ fun LibraryScreen(
                                     onPlay = playVideoWithFolderContext,
                                     onRefresh = { scanner.scanAll() },
                                     modifier = Modifier.padding(pad),
+                                    viewMode = wideViewMode,
+                                    gridCols = gridColumnsTablet,
+                                    thumbSize = when (thumbScale) {
+                                        "small" -> 88.dp
+                                        "large" -> 148.dp
+                                        else -> 116.dp
+                                    },
                                 )
                             }
                         }
@@ -671,6 +694,13 @@ fun LibraryScreen(
                                 threshold = threshold,
                                 onPlay = playVideoWithFolderContext,
                                 onRefresh = { scanner.scanAll() },
+                                viewMode = videoViewMode,
+                                gridCols = gridColumnsPhone.coerceAtLeast(2),
+                                thumbSize = when (thumbScale) {
+                                    "small" -> 88.dp
+                                    "large" -> 148.dp
+                                    else -> 116.dp
+                                },
                             )
                             is HomeSelection.Folder -> {
                                 key(s.folderId, folderPath) {
@@ -775,6 +805,9 @@ fun ContinueWatchingPane(
     onPlay: (VideoEntity) -> Unit,
     onRefresh: suspend () -> Unit,
     modifier: Modifier = Modifier,
+    viewMode: String = "list",
+    gridCols: Int = 2,
+    thumbSize: Dp = 116.dp,
 ) {
     PullRefreshWrapper(
         modifier = modifier.fillMaxSize(),
@@ -789,10 +822,44 @@ fun ContinueWatchingPane(
             ) {
                 Text("이어볼 영상이 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
             }
+        } else if (viewMode == "grid") {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(gridCols.coerceIn(2, 6)),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
+            ) {
+                items(videos, key = { "c" + it.uri }) { v ->
+                    VideoGridCard(
+                        v = v,
+                        threshold = threshold,
+                        isSelected = false,
+                        inSelectionMode = false,
+                        thumbHeight = thumbSize,
+                        onClick = { onPlay(v) },
+                        onLongClick = { onPlay(v) },
+                        onActionWatched = {},
+                        onActionReset = {},
+                        onActionDelete = {},
+                    )
+                }
+            }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(videos, key = { "c" + it.uri }) { v ->
-                    RecentRow(v, threshold) { onPlay(v) }
+                    VideoRow(
+                        v = v,
+                        threshold = threshold,
+                        isSelected = false,
+                        inSelectionMode = false,
+                        thumbWidth = thumbSize,
+                        onClick = { onPlay(v) },
+                        onLongClick = { onPlay(v) },
+                        onActionWatched = {},
+                        onActionReset = {},
+                        onActionDelete = {},
+                    )
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                 }
             }
@@ -823,6 +890,11 @@ fun FolderScreen(
     var query by remember { mutableStateOf("") }
     var sortByName by remember { mutableStateOf(true) }
     var unseenOnly by remember { mutableStateOf(false) }
+    var videoViewMode by remember { mutableStateOf("list") }
+    var wideViewMode by remember { mutableStateOf("list") }
+    var thumbScale by remember { mutableStateOf("medium") }
+    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
+    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
 
     // Multi-selection state for library file management
     var selectedUris by remember { mutableStateOf(setOf<String>()) }
@@ -859,8 +931,18 @@ fun FolderScreen(
     LaunchedEffect(folderId) {
         val s = SettingsRepo(context)
         threshold = s.watchedThreshold.first()
+        videoViewMode = s.videoViewMode.first()
+        wideViewMode = s.wideViewMode.first()
+        thumbScale = s.thumbScale.first()
+        gridColumnsPhone = s.gridColumnsPhone.first()
+        gridColumnsTablet = s.gridColumnsTablet.first()
         launch(Dispatchers.IO) { folder = db.folders().byId(folderId) }
         launch(Dispatchers.IO) { db.videos().observeFolder(folderId).collect { videos = it } }
+        launch(Dispatchers.IO) { s.videoViewMode.collect { videoViewMode = it } }
+        launch(Dispatchers.IO) { s.wideViewMode.collect { wideViewMode = it } }
+        launch(Dispatchers.IO) { s.thumbScale.collect { thumbScale = it } }
+        launch(Dispatchers.IO) { s.gridColumnsPhone.collect { gridColumnsPhone = it } }
+        launch(Dispatchers.IO) { s.gridColumnsTablet.collect { gridColumnsTablet = it } }
     }
 
     val title = folder?.displayName ?: "…"
@@ -953,6 +1035,18 @@ fun FolderScreen(
                         }
                     },
                 )
+                IconButton(
+                    onClick = {
+                        val nextMode = if (videoViewMode == "grid") "list" else "grid"
+                        videoViewMode = nextMode
+                        scope.launch { SettingsRepo(context).setVideoViewMode(nextMode) }
+                    },
+                ) {
+                    Icon(
+                        if (videoViewMode == "grid") Icons.Default.ViewList else Icons.Default.GridView,
+                        if (videoViewMode == "grid") "목록형으로 보기" else "그리드형으로 보기",
+                    )
+                }
                 IconButton(onClick = { sortByName = !sortByName }) {
                     Icon(if (sortByName) Icons.Default.SortByAlpha else Icons.Default.History, "정렬")
                 }
@@ -963,7 +1057,13 @@ fun FolderScreen(
                 )
             }
 
-            // All videos and subfolders in clean LIST format (No grid)
+            // Videos: list or grid per settings; subfolders always list rows.
+            val thumbSize: Dp = when (thumbScale) {
+                "small" -> 88.dp
+                "large" -> 148.dp
+                else -> 116.dp
+            }
+            val gridCols = if (showTopBar) gridColumnsTablet.coerceIn(2, 6) else gridColumnsPhone.coerceAtLeast(2)
             PullRefreshWrapper(
                 modifier = Modifier.weight(1f),
                 onRefresh = { scanner.scanAll() },
@@ -985,32 +1085,6 @@ fun FolderScreen(
                             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                         }
                     }
-                    items(here, key = { it.uri }) { v ->
-                        val isSelected = selectedUris.contains(v.uri)
-                        VideoRow(
-                            v = v,
-                            threshold = threshold,
-                            isSelected = isSelected,
-                            inSelectionMode = inSelectionMode,
-                            onClick = {
-                                if (inSelectionMode) toggleSelect(v.uri)
-                                else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
-                            },
-                            onLongClick = { toggleSelect(v.uri) },
-                            onActionWatched = {
-                                val next = if (v.isWatched(threshold)) -1 else 1
-                                scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
-                            },
-                            onActionReset = {
-                                scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
-                            },
-                            onActionDelete = {
-                                deleteTargetUris = listOf(v.uri)
-                                showDeleteDialog = true
-                            },
-                        )
-                        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-                    }
                     if (subDirs.isEmpty() && here.isEmpty()) {
                         item {
                             Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
@@ -1019,6 +1093,76 @@ fun FolderScreen(
                                     color = Color.Gray,
                                 )
                             }
+                        }
+                    } else if (videoViewMode == "grid") {
+                        // Grid cards as full-width rows inside the single LazyColumn.
+                        val chunks = here.chunked(gridCols.coerceAtLeast(2))
+                        items(chunks, key = { row -> row.first().uri }) { row ->
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                row.forEach { v ->
+                                    val isSelected = selectedUris.contains(v.uri)
+                                    Box(Modifier.weight(1f)) {
+                                        VideoGridCard(
+                                            v = v,
+                                            threshold = threshold,
+                                            isSelected = isSelected,
+                                            inSelectionMode = inSelectionMode,
+                                            thumbHeight = thumbSize,
+                                            onClick = {
+                                                if (inSelectionMode) toggleSelect(v.uri)
+                                                else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
+                                            },
+                                            onLongClick = { toggleSelect(v.uri) },
+                                            onActionWatched = {
+                                                val next = if (v.isWatched(threshold)) -1 else 1
+                                                scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
+                                            },
+                                            onActionReset = {
+                                                scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
+                                            },
+                                            onActionDelete = {
+                                                deleteTargetUris = listOf(v.uri)
+                                                showDeleteDialog = true
+                                            },
+                                        )
+                                    }
+                                }
+                                // Keep last row aligned when it is not full.
+                                repeat(gridCols.coerceAtLeast(2) - row.size) {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    } else {
+                        items(here, key = { it.uri }) { v ->
+                            val isSelected = selectedUris.contains(v.uri)
+                            VideoRow(
+                                v = v,
+                                threshold = threshold,
+                                isSelected = isSelected,
+                                inSelectionMode = inSelectionMode,
+                                thumbWidth = thumbSize,
+                                onClick = {
+                                    if (inSelectionMode) toggleSelect(v.uri)
+                                    else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
+                                },
+                                onLongClick = { toggleSelect(v.uri) },
+                                onActionWatched = {
+                                    val next = if (v.isWatched(threshold)) -1 else 1
+                                    scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
+                                },
+                                onActionReset = {
+                                    scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
+                                },
+                                onActionDelete = {
+                                    deleteTargetUris = listOf(v.uri)
+                                    showDeleteDialog = true
+                                },
+                            )
+                            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                         }
                     }
                 }
@@ -1389,6 +1533,7 @@ fun VideoRow(
     onActionWatched: () -> Unit,
     onActionReset: () -> Unit,
     onActionDelete: () -> Unit,
+    thumbWidth: Dp = 116.dp,
 ) {
     val watched = v.isWatched(threshold)
     val inProgress = v.isInProgress(threshold)
@@ -1406,7 +1551,7 @@ fun VideoRow(
         Thumb(
             uri = v.uri,
             modifier = Modifier
-                .size(116.dp, 66.dp)
+                .size(thumbWidth, (thumbWidth.value * 9f / 16f).dp)
                 .clip(RoundedCornerShape(8.dp)),
             isWatched = watched,
             isSelected = isSelected,
@@ -1538,6 +1683,7 @@ fun VideoGridCard(
     onActionWatched: () -> Unit,
     onActionReset: () -> Unit,
     onActionDelete: () -> Unit,
+    thumbHeight: Dp = 116.dp,
 ) {
     val watched = v.isWatched(threshold)
     val inProgress = v.isInProgress(threshold)
@@ -1554,7 +1700,8 @@ fun VideoGridCard(
         ),
     ) {
         Column {
-            Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+            val thumbH = (thumbHeight.value * 9f / 16f).dp
+            Box(Modifier.fillMaxWidth().height(thumbH)) {
                 Thumb(v.uri, Modifier.matchParentSize(), isWatched = watched, isSelected = isSelected)
                 if (v.durationSec > 0) {
                     LinearProgressIndicator(
@@ -1654,6 +1801,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     var autoSub by remember { mutableStateOf(true) }
     var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
     var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
+    var videoViewMode by remember { mutableStateOf("list") }
+    var wideViewMode by remember { mutableStateOf("list") }
+    var thumbScale by remember { mutableStateOf("medium") }
 
     // UI state for inputs & modals
     var newSpeedInput by remember { mutableStateOf("") }
@@ -1674,6 +1824,9 @@ fun SettingsScreen(onBack: () -> Unit) {
         autoSub = settings.autoSubtitle.first()
         gridColumnsTablet = settings.gridColumnsTablet.first()
         gridColumnsPhone = settings.gridColumnsPhone.first()
+        videoViewMode = settings.videoViewMode.first()
+        wideViewMode = settings.wideViewMode.first()
+        thumbScale = settings.thumbScale.first()
         loaded = true
     }
     if (!loaded) return
@@ -1818,7 +1971,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
-            // 화면별 그리드 열 수 (크기 조절)
+            // 영상 목록 표시 방식 (현재 레이아웃에 맞춰 적용)
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -1827,49 +1980,123 @@ fun SettingsScreen(onBack: () -> Unit) {
                 ) {
                     Column(Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.GridView, null, tint = MaterialTheme.colorScheme.primary)
+                            Icon(Icons.Default.ViewModule, null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(Modifier.width(8.dp))
-                            Text("화면별 그리드 열 수 (크기 조절)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text("영상 목록 표시 방식", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         }
                         Text(
-                            "폴더블이나 태블릿 대화면에서 카드가 너무 크게 표시되지 않도록 가로 열 개수를 조절합니다. (세로는 16:9 비율에 맞춰 자동 조정)",
+                            "폴더 화면과 이어보기에 바로 적용됩니다. 그리드에서는 가로 열 수, 목록에서는 썸네일 크기를 조절합니다.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.Gray,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                         )
 
-                        Text("대화면 / 태블릿 / 폴더블 가로 열 수", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text("스마트폰 세로 화면", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(6.dp))
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         ) {
-                            listOf(2, 3, 4, 5, 6).forEach { cols ->
-                                FilterChip(
-                                    selected = gridColumnsTablet == cols,
-                                    onClick = {
-                                        gridColumnsTablet = cols
-                                        scope.launch { settings.setGridColumnsTablet(cols) }
-                                    },
-                                    label = { Text("${cols}열" + if (cols == 4) " (추천)" else "") },
-                                )
+                            FilterChip(
+                                selected = videoViewMode == "list",
+                                onClick = {
+                                    videoViewMode = "list"
+                                    scope.launch { settings.setVideoViewMode("list") }
+                                },
+                                label = { Text("목록형 (추천)") },
+                            )
+                            FilterChip(
+                                selected = videoViewMode == "grid",
+                                onClick = {
+                                    videoViewMode = "grid"
+                                    scope.launch { settings.setVideoViewMode("grid") }
+                                },
+                                label = { Text("그리드형") },
+                            )
+                        }
+
+                        if (videoViewMode == "grid") {
+                            Spacer(Modifier.height(8.dp))
+                            Text("세로 화면 그리드 가로 열 수", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            ) {
+                                listOf(2, 3, 4).forEach { cols ->
+                                    FilterChip(
+                                        selected = gridColumnsPhone == cols,
+                                        onClick = {
+                                            gridColumnsPhone = cols
+                                            scope.launch { settings.setGridColumnsPhone(cols) }
+                                        },
+                                        label = { Text("${cols}열") },
+                                    )
+                                }
                             }
                         }
 
                         Spacer(Modifier.height(14.dp))
 
-                        Text("스마트폰 세로 모드 목록 형태", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text("폴더블/태블릿 대화면", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(6.dp))
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         ) {
-                            listOf(1 to "1열 (상세 목록)", 2 to "2열 그리드", 3 to "3열 그리드").forEach { (cols, label) ->
+                            FilterChip(
+                                selected = wideViewMode == "list",
+                                onClick = {
+                                    wideViewMode = "list"
+                                    scope.launch { settings.setWideViewMode("list") }
+                                },
+                                label = { Text("목록형 (추천)") },
+                            )
+                            FilterChip(
+                                selected = wideViewMode == "grid",
+                                onClick = {
+                                    wideViewMode = "grid"
+                                    scope.launch { settings.setWideViewMode("grid") }
+                                },
+                                label = { Text("그리드형") },
+                            )
+                        }
+
+                        if (wideViewMode == "grid") {
+                            Spacer(Modifier.height(8.dp))
+                            Text("대화면 그리드 가로 열 수", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            ) {
+                                listOf(2, 3, 4, 5, 6).forEach { cols ->
+                                    FilterChip(
+                                        selected = gridColumnsTablet == cols,
+                                        onClick = {
+                                            gridColumnsTablet = cols
+                                            scope.launch { settings.setGridColumnsTablet(cols) }
+                                        },
+                                        label = { Text("${cols}열" + if (cols == 4) " (추천)" else "") },
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(14.dp))
+
+                        Text("목록형 썸네일 크기", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        ) {
+                            listOf("small" to "작게", "medium" to "보통 (추천)", "large" to "크게").forEach { (v, label) ->
                                 FilterChip(
-                                    selected = gridColumnsPhone == cols,
+                                    selected = thumbScale == v,
                                     onClick = {
-                                        gridColumnsPhone = cols
-                                        scope.launch { settings.setGridColumnsPhone(cols) }
+                                        thumbScale = v
+                                        scope.launch { settings.setThumbScale(v) }
                                     },
                                     label = { Text(label) },
                                 )
