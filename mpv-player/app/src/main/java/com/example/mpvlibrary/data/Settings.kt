@@ -3,7 +3,6 @@ package com.example.mpvlibrary.data
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
-import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -49,14 +48,7 @@ class SettingsRepo(private val context: Context) {
         val KEY_AUTO_SUB = booleanPreferencesKey("auto_subtitle")
         val KEY_SUB_FONT_SIZE = doublePreferencesKey("sub_font_size")
         val KEY_SUB_COLOR = stringPreferencesKey("sub_color")
-        val KEY_GRID_COLUMNS_TABLET = intPreferencesKey("grid_columns_tablet")
-        val KEY_GRID_COLUMNS_PHONE = intPreferencesKey("grid_columns_phone")
-        val KEY_VIDEO_VIEW_MODE = stringPreferencesKey("video_view_mode")
-        val KEY_WIDE_VIEW_MODE = stringPreferencesKey("wide_view_mode")
         val KEY_THUMB_SCALE = stringPreferencesKey("thumb_scale")
-
-        const val DEFAULT_GRID_COLUMNS_TABLET = 4
-        const val DEFAULT_GRID_COLUMNS_PHONE = 1
 
         const val DEFAULT_SUB_FONT_SIZE = 55.0
         const val DEFAULT_SUB_COLOR = "#FFFFFF"
@@ -159,16 +151,8 @@ class SettingsRepo(private val context: Context) {
     suspend fun setRememberBrightness(v: Boolean) { context.dataStore.edit { it[KEY_REMEMBER_BRIGHT] = v } }
     suspend fun setSavedBrightness(v: Double) { context.dataStore.edit { it[KEY_SAVED_BRIGHT] = v } }
     suspend fun setAutoSubtitle(v: Boolean) { context.dataStore.edit { it[KEY_AUTO_SUB] = v } }
-    val gridColumnsTablet: Flow<Int> = context.dataStore.data.map { it[KEY_GRID_COLUMNS_TABLET] ?: DEFAULT_GRID_COLUMNS_TABLET }
-    val gridColumnsPhone: Flow<Int> = context.dataStore.data.map { it[KEY_GRID_COLUMNS_PHONE] ?: DEFAULT_GRID_COLUMNS_PHONE }
-    val videoViewMode: Flow<String> = context.dataStore.data.map { it[KEY_VIDEO_VIEW_MODE] ?: "list" }
-    val wideViewMode: Flow<String> = context.dataStore.data.map { it[KEY_WIDE_VIEW_MODE] ?: "list" }
     val thumbScale: Flow<String> = context.dataStore.data.map { it[KEY_THUMB_SCALE] ?: "medium" }
 
-    suspend fun setGridColumnsTablet(v: Int) { context.dataStore.edit { it[KEY_GRID_COLUMNS_TABLET] = v.coerceIn(2, 6) } }
-    suspend fun setGridColumnsPhone(v: Int) { context.dataStore.edit { it[KEY_GRID_COLUMNS_PHONE] = v.coerceIn(1, 3) } }
-    suspend fun setVideoViewMode(v: String) { context.dataStore.edit { it[KEY_VIDEO_VIEW_MODE] = if (v == "grid") "grid" else "list" } }
-    suspend fun setWideViewMode(v: String) { context.dataStore.edit { it[KEY_WIDE_VIEW_MODE] = if (v == "grid") "grid" else "list" } }
     suspend fun setThumbScale(v: String) {
         context.dataStore.edit { it[KEY_THUMB_SCALE] = if (v in setOf("small", "medium", "large")) v else "medium" }
     }

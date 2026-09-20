@@ -31,10 +31,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
@@ -260,7 +256,7 @@ fun AppScaffold(
 
 /**
  * Pull-to-refresh wrapper (material3 1.2 API): drag list down from the top
- * to rescan. Works for both LazyColumn and LazyVerticalGrid children.
+ * to rescan.
  */
 @Composable
 fun PullRefreshWrapper(
@@ -365,11 +361,7 @@ fun LibraryScreen(
     var recent by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
     var threshold by remember { mutableStateOf(0.9) }
     var showStartupPermDialog by remember { mutableStateOf(!MainActivity.hasAllFilesAccess(context)) }
-    var videoViewMode by remember { mutableStateOf("list") }
-    var wideViewMode by remember { mutableStateOf("list") }
     var thumbScale by remember { mutableStateOf("medium") }
-    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
-    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
 
     // Re-check permission whenever app returns to foreground (ON_RESUME)
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -398,18 +390,10 @@ fun LibraryScreen(
     LaunchedEffect(Unit) {
         val s = SettingsRepo(context)
         threshold = s.watchedThreshold.first()
-        videoViewMode = s.videoViewMode.first()
-        wideViewMode = s.wideViewMode.first()
         thumbScale = s.thumbScale.first()
-        gridColumnsPhone = s.gridColumnsPhone.first()
-        gridColumnsTablet = s.gridColumnsTablet.first()
         launch(Dispatchers.IO) { db.folders().observeAll().collect { folders = it } }
         launch(Dispatchers.IO) { db.videos().observeRecent(10).collect { recent = it } }
-        launch(Dispatchers.IO) { s.videoViewMode.collect { videoViewMode = it } }
-        launch(Dispatchers.IO) { s.wideViewMode.collect { wideViewMode = it } }
         launch(Dispatchers.IO) { s.thumbScale.collect { thumbScale = it } }
-        launch(Dispatchers.IO) { s.gridColumnsPhone.collect { gridColumnsPhone = it } }
-        launch(Dispatchers.IO) { s.gridColumnsTablet.collect { gridColumnsTablet = it } }
     }
 
     // Keep selection valid: default to 이어보기, drop removed folders, reset stale sub-paths.
@@ -568,8 +552,6 @@ fun LibraryScreen(
                                     onPlay = playVideoWithFolderContext,
                                     onRefresh = { scanner.scanAll() },
                                     modifier = Modifier.padding(pad),
-                                    viewMode = wideViewMode,
-                                    gridCols = gridColumnsTablet,
                                     thumbSize = when (thumbScale) {
                                         "small" -> 88.dp
                                         "large" -> 148.dp
@@ -694,8 +676,6 @@ fun LibraryScreen(
                                 threshold = threshold,
                                 onPlay = playVideoWithFolderContext,
                                 onRefresh = { scanner.scanAll() },
-                                viewMode = videoViewMode,
-                                gridCols = gridColumnsPhone.coerceAtLeast(2),
                                 thumbSize = when (thumbScale) {
                                     "small" -> 88.dp
                                     "large" -> 148.dp
@@ -805,8 +785,6 @@ fun ContinueWatchingPane(
     onPlay: (VideoEntity) -> Unit,
     onRefresh: suspend () -> Unit,
     modifier: Modifier = Modifier,
-    viewMode: String = "list",
-    gridCols: Int = 2,
     thumbSize: Dp = 116.dp,
 ) {
     PullRefreshWrapper(
@@ -821,29 +799,6 @@ fun ContinueWatchingPane(
                 contentAlignment = Alignment.Center,
             ) {
                 Text("이어볼 영상이 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
-            }
-        } else if (viewMode == "grid") {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(gridCols.coerceIn(2, 6)),
-                modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 8.dp),
-            ) {
-                items(videos, key = { "c" + it.uri }) { v ->
-                    VideoGridCard(
-                        v = v,
-                        threshold = threshold,
-                        isSelected = false,
-                        inSelectionMode = false,
-                        thumbHeight = thumbSize,
-                        onClick = { onPlay(v) },
-                        onLongClick = { onPlay(v) },
-                        onActionWatched = {},
-                        onActionReset = {},
-                        onActionDelete = {},
-                    )
-                }
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
@@ -890,11 +845,7 @@ fun FolderScreen(
     var query by remember { mutableStateOf("") }
     var sortByName by remember { mutableStateOf(true) }
     var unseenOnly by remember { mutableStateOf(false) }
-    var videoViewMode by remember { mutableStateOf("list") }
-    var wideViewMode by remember { mutableStateOf("list") }
     var thumbScale by remember { mutableStateOf("medium") }
-    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
-    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
 
     // Multi-selection state for library file management
     var selectedUris by remember { mutableStateOf(setOf<String>()) }
@@ -931,18 +882,10 @@ fun FolderScreen(
     LaunchedEffect(folderId) {
         val s = SettingsRepo(context)
         threshold = s.watchedThreshold.first()
-        videoViewMode = s.videoViewMode.first()
-        wideViewMode = s.wideViewMode.first()
         thumbScale = s.thumbScale.first()
-        gridColumnsPhone = s.gridColumnsPhone.first()
-        gridColumnsTablet = s.gridColumnsTablet.first()
         launch(Dispatchers.IO) { folder = db.folders().byId(folderId) }
         launch(Dispatchers.IO) { db.videos().observeFolder(folderId).collect { videos = it } }
-        launch(Dispatchers.IO) { s.videoViewMode.collect { videoViewMode = it } }
-        launch(Dispatchers.IO) { s.wideViewMode.collect { wideViewMode = it } }
         launch(Dispatchers.IO) { s.thumbScale.collect { thumbScale = it } }
-        launch(Dispatchers.IO) { s.gridColumnsPhone.collect { gridColumnsPhone = it } }
-        launch(Dispatchers.IO) { s.gridColumnsTablet.collect { gridColumnsTablet = it } }
     }
 
     val title = folder?.displayName ?: "…"
@@ -1035,18 +978,6 @@ fun FolderScreen(
                         }
                     },
                 )
-                IconButton(
-                    onClick = {
-                        val nextMode = if (videoViewMode == "grid") "list" else "grid"
-                        videoViewMode = nextMode
-                        scope.launch { SettingsRepo(context).setVideoViewMode(nextMode) }
-                    },
-                ) {
-                    Icon(
-                        if (videoViewMode == "grid") Icons.Default.ViewList else Icons.Default.GridView,
-                        if (videoViewMode == "grid") "목록형으로 보기" else "그리드형으로 보기",
-                    )
-                }
                 IconButton(onClick = { sortByName = !sortByName }) {
                     Icon(if (sortByName) Icons.Default.SortByAlpha else Icons.Default.History, "정렬")
                 }
@@ -1057,13 +988,12 @@ fun FolderScreen(
                 )
             }
 
-            // Videos: list or grid per settings; subfolders always list rows.
+            // Videos: list only.
             val thumbSize: Dp = when (thumbScale) {
                 "small" -> 88.dp
                 "large" -> 148.dp
                 else -> 116.dp
             }
-            val gridCols = if (showTopBar) gridColumnsTablet.coerceIn(2, 6) else gridColumnsPhone.coerceAtLeast(2)
             PullRefreshWrapper(
                 modifier = Modifier.weight(1f),
                 onRefresh = { scanner.scanAll() },
@@ -1092,48 +1022,6 @@ fun FolderScreen(
                                     if (path.isEmpty()) "영상이 없습니다. 새로고침(⟳)해 보세요." else "이 폴더에 영상이 없습니다.",
                                     color = Color.Gray,
                                 )
-                            }
-                        }
-                    } else if (videoViewMode == "grid") {
-                        // Grid cards as full-width rows inside the single LazyColumn.
-                        val chunks = here.chunked(gridCols.coerceAtLeast(2))
-                        items(chunks, key = { row -> row.first().uri }) { row ->
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                row.forEach { v ->
-                                    val isSelected = selectedUris.contains(v.uri)
-                                    Box(Modifier.weight(1f)) {
-                                        VideoGridCard(
-                                            v = v,
-                                            threshold = threshold,
-                                            isSelected = isSelected,
-                                            inSelectionMode = inSelectionMode,
-                                            thumbHeight = thumbSize,
-                                            onClick = {
-                                                if (inSelectionMode) toggleSelect(v.uri)
-                                                else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
-                                            },
-                                            onLongClick = { toggleSelect(v.uri) },
-                                            onActionWatched = {
-                                                val next = if (v.isWatched(threshold)) -1 else 1
-                                                scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
-                                            },
-                                            onActionReset = {
-                                                scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
-                                            },
-                                            onActionDelete = {
-                                                deleteTargetUris = listOf(v.uri)
-                                                showDeleteDialog = true
-                                            },
-                                        )
-                                    }
-                                }
-                                // Keep last row aligned when it is not full.
-                                repeat(gridCols.coerceAtLeast(2) - row.size) {
-                                    Spacer(Modifier.weight(1f))
-                                }
                             }
                         }
                     } else {
@@ -1671,114 +1559,6 @@ fun VideoRow(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-fun VideoGridCard(
-    v: VideoEntity,
-    threshold: Double,
-    isSelected: Boolean,
-    inSelectionMode: Boolean,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit,
-    onActionWatched: () -> Unit,
-    onActionReset: () -> Unit,
-    onActionDelete: () -> Unit,
-    thumbHeight: Dp = 116.dp,
-) {
-    val watched = v.isWatched(threshold)
-    val inProgress = v.isInProgress(threshold)
-    var showMenu by remember { mutableStateOf(false) }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-            else MaterialTheme.colorScheme.surfaceVariant,
-        ),
-    ) {
-        Column {
-            val thumbH = (thumbHeight.value * 9f / 16f).dp
-            Box(Modifier.fillMaxWidth().height(thumbH)) {
-                Thumb(v.uri, Modifier.matchParentSize(), isWatched = watched, isSelected = isSelected)
-                if (v.durationSec > 0) {
-                    LinearProgressIndicator(
-                        progress = { v.fraction.toFloat() },
-                        modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter).height(4.dp),
-                        color = if (watched) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary,
-                        trackColor = Color.White.copy(alpha = 0.2f),
-                    )
-                }
-            }
-            Column(Modifier.padding(12.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        v.name,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        fontWeight = if (inProgress) FontWeight.Bold else FontWeight.SemiBold,
-                        style = MaterialTheme.typography.titleSmall,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Box {
-                        IconButton(onClick = { showMenu = true }, modifier = Modifier.size(24.dp)) {
-                            Icon(Icons.Default.MoreVert, "더보기", tint = Color.Gray, modifier = Modifier.size(18.dp))
-                        }
-                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text(if (watched) "미시청으로 표시" else "시청 완료로 표시") },
-                                onClick = { onActionWatched(); showMenu = false },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("재생 기록 초기화") },
-                                onClick = { onActionReset(); showMenu = false },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("삭제", color = MaterialTheme.colorScheme.error) },
-                                onClick = { onActionDelete(); showMenu = false },
-                            )
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(4.dp))
-
-                val meta = listOfNotNull(
-                    v.dirPath.ifEmpty { null },
-                    fmtSize(v.sizeBytes).ifEmpty { null },
-                    fmtDate(v.lastModified).ifEmpty { null },
-                ).joinToString(" · ")
-
-                if (meta.isNotEmpty()) {
-                    Text(meta, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                    Spacer(Modifier.height(4.dp))
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    when {
-                        watched -> Badge(containerColor = Color(0xFF2E7D32)) {
-                            Text("완료", color = Color.White, style = MaterialTheme.typography.labelSmall)
-                        }
-                        inProgress -> Badge(containerColor = MaterialTheme.colorScheme.primary) {
-                            Text(pct(v.fraction), color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.labelSmall)
-                        }
-                        else -> Badge(containerColor = Color(0xFFE65100)) {
-                            Text("NEW", color = Color.White, style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        if (v.durationSec > 0) "${fmtTime(v.positionSec)} / ${fmtTime(v.durationSec)}" else pct(v.fraction),
-                        style = MaterialTheme.typography.bodySmall, color = Color.Gray,
-                    )
-                }
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------- Settings
 
 @Composable
@@ -1799,10 +1579,6 @@ fun SettingsScreen(onBack: () -> Unit) {
     var fastSpeed by remember { mutableStateOf(2.0) }
     var rememberBright by remember { mutableStateOf(false) }
     var autoSub by remember { mutableStateOf(true) }
-    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
-    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
-    var videoViewMode by remember { mutableStateOf("list") }
-    var wideViewMode by remember { mutableStateOf("list") }
     var thumbScale by remember { mutableStateOf("medium") }
 
     // UI state for inputs & modals
@@ -1822,10 +1598,6 @@ fun SettingsScreen(onBack: () -> Unit) {
         fastSpeed = settings.fastSpeed.first()
         rememberBright = settings.rememberBrightness.first()
         autoSub = settings.autoSubtitle.first()
-        gridColumnsTablet = settings.gridColumnsTablet.first()
-        gridColumnsPhone = settings.gridColumnsPhone.first()
-        videoViewMode = settings.videoViewMode.first()
-        wideViewMode = settings.wideViewMode.first()
         thumbScale = settings.thumbScale.first()
         loaded = true
     }
@@ -1971,7 +1743,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
-            // 영상 목록 표시 방식 (현재 레이아웃에 맞춰 적용)
+            // 목록형 썸네일 크기 (모든 화면 공통)
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -1980,112 +1752,18 @@ fun SettingsScreen(onBack: () -> Unit) {
                 ) {
                     Column(Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.ViewModule, null, tint = MaterialTheme.colorScheme.primary)
+                            Icon(Icons.Default.ViewList, null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(Modifier.width(8.dp))
-                            Text("영상 목록 표시 방식", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text("목록형 썸네일 크기", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         }
                         Text(
-                            "폴더 화면과 이어보기에 바로 적용됩니다. 그리드에서는 가로 열 수, 목록에서는 썸네일 크기를 조절합니다.",
+                            "폴더 화면과 이어보기의 목록형 썸네일 크기에 바로 적용됩니다.",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.Gray,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                         )
 
-                        Text("스마트폰 세로 화면", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(6.dp))
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        ) {
-                            FilterChip(
-                                selected = videoViewMode == "list",
-                                onClick = {
-                                    videoViewMode = "list"
-                                    scope.launch { settings.setVideoViewMode("list") }
-                                },
-                                label = { Text("목록형 (추천)") },
-                            )
-                            FilterChip(
-                                selected = videoViewMode == "grid",
-                                onClick = {
-                                    videoViewMode = "grid"
-                                    scope.launch { settings.setVideoViewMode("grid") }
-                                },
-                                label = { Text("그리드형") },
-                            )
-                        }
-
-                        if (videoViewMode == "grid") {
-                            Spacer(Modifier.height(8.dp))
-                            Text("세로 화면 그리드 가로 열 수", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(6.dp))
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            ) {
-                                listOf(2, 3, 4).forEach { cols ->
-                                    FilterChip(
-                                        selected = gridColumnsPhone == cols,
-                                        onClick = {
-                                            gridColumnsPhone = cols
-                                            scope.launch { settings.setGridColumnsPhone(cols) }
-                                        },
-                                        label = { Text("${cols}열") },
-                                    )
-                                }
-                            }
-                        }
-
-                        Spacer(Modifier.height(14.dp))
-
-                        Text("폴더블/태블릿 대화면", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(6.dp))
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        ) {
-                            FilterChip(
-                                selected = wideViewMode == "list",
-                                onClick = {
-                                    wideViewMode = "list"
-                                    scope.launch { settings.setWideViewMode("list") }
-                                },
-                                label = { Text("목록형 (추천)") },
-                            )
-                            FilterChip(
-                                selected = wideViewMode == "grid",
-                                onClick = {
-                                    wideViewMode = "grid"
-                                    scope.launch { settings.setWideViewMode("grid") }
-                                },
-                                label = { Text("그리드형") },
-                            )
-                        }
-
-                        if (wideViewMode == "grid") {
-                            Spacer(Modifier.height(8.dp))
-                            Text("대화면 그리드 가로 열 수", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
-                            Spacer(Modifier.height(6.dp))
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            ) {
-                                listOf(2, 3, 4, 5, 6).forEach { cols ->
-                                    FilterChip(
-                                        selected = gridColumnsTablet == cols,
-                                        onClick = {
-                                            gridColumnsTablet = cols
-                                            scope.launch { settings.setGridColumnsTablet(cols) }
-                                        },
-                                        label = { Text("${cols}열" + if (cols == 4) " (추천)" else "") },
-                                    )
-                                }
-                            }
-                        }
-
-                        Spacer(Modifier.height(14.dp))
-
-                        Text("목록형 썸네일 크기", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text("썸네일 크기", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(6.dp))
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
