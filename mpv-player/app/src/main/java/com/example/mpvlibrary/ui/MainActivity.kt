@@ -305,6 +305,53 @@ private sealed interface HomeSelection {
 }
 
 @Composable
+fun SidebarItem(
+    icon: @Composable () -> Unit,
+    label: String,
+    badge: Int? = null,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    val bg = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
+    val fg = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = bg,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CompositionLocalProvider(LocalContentColor provides fg) {
+                icon()
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                color = fg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (badge != null && badge > 0) {
+                Badge(
+                    containerColor = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                ) {
+                    Text(badge.toString(), fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun LibraryScreen(
     onSettings: () -> Unit,
 ) {
@@ -316,8 +363,6 @@ fun LibraryScreen(
     var folders by remember { mutableStateOf<List<FolderEntity>>(emptyList()) }
     var recent by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
     var threshold by remember { mutableStateOf(0.9) }
-    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
-    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
     var showStartupPermDialog by remember { mutableStateOf(!MainActivity.hasAllFilesAccess(context)) }
 
     // Re-check permission whenever app returns to foreground (ON_RESUME)
@@ -336,7 +381,6 @@ fun LibraryScreen(
     var folderPath by remember { mutableStateOf("") }
 
     // Back: sub-folder -> folder root -> 이어보기 (so every entry/exit path stays reachable).
-    // Single handler: folder root pops to 이어보기 instead of swallowing the event.
     BackHandler(enabled = selection is HomeSelection.Folder) {
         if (folderPath.isNotEmpty()) {
             folderPath = if (folderPath.contains('/')) folderPath.substringBeforeLast('/') else ""
@@ -350,8 +394,6 @@ fun LibraryScreen(
         threshold = s.watchedThreshold.first()
         launch(Dispatchers.IO) { db.folders().observeAll().collect { folders = it } }
         launch(Dispatchers.IO) { db.videos().observeRecent(10).collect { recent = it } }
-        launch(Dispatchers.IO) { s.gridColumnsTablet.collect { gridColumnsTablet = it } }
-        launch(Dispatchers.IO) { s.gridColumnsPhone.collect { gridColumnsPhone = it } }
     }
 
     // Keep selection valid: default to 이어보기, drop removed folders, reset stale sub-paths.
@@ -402,121 +444,186 @@ fun LibraryScreen(
         }
     }
 
-    AppScaffold(
-        title = "MoVo",
-        onBack = null,
-        actions = {
-            IconButton(onClick = { picker.launch(null) }) {
-                Icon(Icons.Default.CreateNewFolder, "영상 폴더 등록")
-            }
-            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
-                Icon(Icons.Default.Refresh, "스캔")
-            }
-            IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
-        },
-    ) {
-        var isWidePanel by remember { mutableStateOf(false) }
-        BoxWithConstraints(Modifier.fillMaxSize()) {
-            val isWide = maxWidth >= 600.dp
-            LaunchedEffect(isWide) { isWidePanel = isWide }
-            if (isWide) {
-                Row(Modifier.fillMaxSize()) {
-                    // Left sidebar: 이어보기 + registered folders (custom rail: full labels, no squeeze).
-                    Column(
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val isWide = maxWidth >= 600.dp
+
+        if (isWide) {
+            // WIDE SCREEN (Foldable unfolded / Tablet): Permanent Left Sidebar + Right Content
+            Row(Modifier.fillMaxSize()) {
+                // 1. LEFT SIDEBAR (240.dp)
+                Column(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .width(240.dp)
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(vertical = 12.dp, horizontal = 4.dp),
+                ) {
+                    // Header: Brand & Add Folder Button
+                    Row(
                         modifier = Modifier
-                            .fillMaxHeight()
-                            .width(200.dp)
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .verticalScroll(rememberScrollState())
-                            .padding(vertical = 8.dp),
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        val railItem: @Composable (selected: Boolean, onClick: () -> Unit, icon: @Composable () -> Unit, label: String) -> Unit =
-                            { selected, onClick, icon, label ->
-                                val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer
-                                else Color.Transparent
-                                val fg = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                                Surface(
-                                    onClick = onClick,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                                    shape = RoundedCornerShape(16.dp),
-                                    color = bg,
-                                ) {
-                                    Column(
-                                        Modifier.padding(vertical = 10.dp),
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                    ) {
-                                        CompositionLocalProvider(LocalContentColor provides fg) { icon() }
-                                        Spacer(Modifier.height(4.dp))
-                                        Text(
-                                            label,
-                                            maxLines = 2,
-                                            overflow = TextOverflow.Ellipsis,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = fg,
-                                        )
-                                    }
-                                }
-                            }
-                        railItem(
-                            selection is HomeSelection.ContinueWatching,
-                            { selection = HomeSelection.ContinueWatching },
-                            { Icon(Icons.Default.PlayCircle, null) },
-                            "이어보기",
+                        Text(
+                            "MoVo",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f),
                         )
-                        HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 12.dp))
-                        folders.forEach { f ->
+                        IconButton(onClick = { picker.launch(null) }) {
+                            Icon(Icons.Default.Add, "영상 폴더 등록", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    // 이어보기 Navigation Item
+                    SidebarItem(
+                        icon = { Icon(Icons.Default.PlayCircle, null) },
+                        label = "이어보기",
+                        badge = continueWatching.size.takeIf { it > 0 },
+                        selected = selection is HomeSelection.ContinueWatching,
+                        onClick = { selection = HomeSelection.ContinueWatching },
+                    )
+
+                    HorizontalDivider(Modifier.padding(vertical = 10.dp, horizontal = 8.dp))
+
+                    // Registered Folders Section Header
+                    Text(
+                        "비디오 폴더",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+
+                    LazyColumn(Modifier.weight(1f)) {
+                        items(folders, key = { it.id }) { f ->
                             val selected = selection is HomeSelection.Folder &&
                                 (selection as HomeSelection.Folder).folderId == f.id
-                            railItem(
-                                selected,
-                                {
+                            SidebarItem(
+                                icon = { Icon(Icons.Default.Folder, null) },
+                                label = f.displayName,
+                                badge = null,
+                                selected = selected,
+                                onClick = {
                                     folderPath = ""
                                     selection = HomeSelection.Folder(f.id, "")
                                 },
-                                { Icon(Icons.Default.Folder, null) },
-                                f.displayName,
                             )
                         }
                     }
-                    VerticalDivider()
-                    // Right content: selected item
-                    Box(Modifier.weight(1f).fillMaxHeight()) {
-                        when (val sel = selection) {
-                            is HomeSelection.ContinueWatching -> ContinueWatchingPane(
-                                videos = continueWatching,
-                                threshold = threshold,
-                                useGrid = gridColumnsPhone > 1 || gridColumnsTablet > 1,
-                                colCount = gridColumnsTablet,
-                                onPlay = playVideoWithFolderContext,
-                                onRefresh = { scanner.scanAll() },
-                            )
-                            is HomeSelection.Folder -> {
-                                key(sel.folderId, folderPath) {
-                                    FolderScreen(
-                                        folderId = sel.folderId,
-                                        path = folderPath,
-                                        onPath = { folderPath = it },
-                                        onBack = null,
-                                        onSettings = onSettings,
-                                        isWideOverride = false,
-                                        onFolderDeleted = {
-                                            selection = HomeSelection.ContinueWatching
-                                            folderPath = ""
+
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 8.dp))
+
+                    // Settings Button
+                    SidebarItem(
+                        icon = { Icon(Icons.Default.Settings, null) },
+                        label = "설정",
+                        badge = null,
+                        selected = false,
+                        onClick = onSettings,
+                    )
+                }
+
+                VerticalDivider()
+
+                // 2. RIGHT CONTENT PANE (Single TopAppBar)
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    when (val sel = selection) {
+                        is HomeSelection.ContinueWatching -> {
+                            Scaffold(
+                                topBar = {
+                                    TopAppBar(
+                                        title = { Text("이어보기", fontWeight = FontWeight.Bold) },
+                                        actions = {
+                                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
+                                                Icon(Icons.Default.Refresh, "스캔")
+                                            }
                                         },
+                                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                                     )
-                                }
+                                },
+                            ) { pad ->
+                                ContinueWatchingPane(
+                                    videos = continueWatching,
+                                    threshold = threshold,
+                                    onPlay = playVideoWithFolderContext,
+                                    onRefresh = { scanner.scanAll() },
+                                    modifier = Modifier.padding(pad),
+                                )
+                            }
+                        }
+                        is HomeSelection.Folder -> {
+                            key(sel.folderId, folderPath) {
+                                FolderScreen(
+                                    folderId = sel.folderId,
+                                    path = folderPath,
+                                    onPath = { folderPath = it },
+                                    onBack = if (folderPath.isNotEmpty()) {
+                                        {
+                                            folderPath = if (folderPath.contains('/')) folderPath.substringBeforeLast('/')
+                                            else ""
+                                        }
+                                    } else null,
+                                    onSettings = onSettings,
+                                    showTopBar = true,
+                                    onFolderDeleted = {
+                                        selection = HomeSelection.ContinueWatching
+                                        folderPath = ""
+                                    },
+                                )
                             }
                         }
                     }
                 }
-            } else {
-                // Narrow: tab strip (이어보기 + folders) always visible, content below it.
-                val sel = selection
-                Column(Modifier.fillMaxSize()) {
-                    // Sidebar-equivalent selector on top: 이어보기 + folders as chips/tabs.
+            }
+        } else {
+            // NARROW SCREEN (Portrait Phone): Single TopAppBar + Horizontal Tabs
+            val sel = selection
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        navigationIcon = {
+                            if (sel is HomeSelection.Folder) {
+                                IconButton(onClick = {
+                                    if (folderPath.isNotEmpty()) {
+                                        folderPath = if (folderPath.contains('/')) folderPath.substringBeforeLast('/') else ""
+                                    } else {
+                                        selection = HomeSelection.ContinueWatching
+                                    }
+                                }) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "뒤로가기")
+                                }
+                            }
+                        },
+                        title = {
+                            when (val s = selection) {
+                                is HomeSelection.ContinueWatching -> Text("MoVo", fontWeight = FontWeight.Bold)
+                                is HomeSelection.Folder -> {
+                                    val curF = folders.find { it.id == s.folderId }
+                                    val fName = curF?.displayName ?: "폴더"
+                                    val displayTitle = if (folderPath.isEmpty()) fName else "$fName / ${folderPath.substringAfterLast('/')}"
+                                    Text(displayTitle, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { picker.launch(null) }) {
+                                Icon(Icons.Default.CreateNewFolder, "영상 폴더 등록")
+                            }
+                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
+                                Icon(Icons.Default.Refresh, "스캔")
+                            }
+                            IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                    )
+                },
+            ) { pad ->
+                Column(Modifier.padding(pad).fillMaxSize()) {
+                    // Horizontal navigation tabs for 1-tap switching between 이어보기 & folders
                     ScrollableTabRow(
                         selectedTabIndex = when (sel) {
                             is HomeSelection.ContinueWatching -> 0
@@ -527,7 +634,17 @@ fun LibraryScreen(
                         Tab(
                             selected = sel is HomeSelection.ContinueWatching,
                             onClick = { selection = HomeSelection.ContinueWatching },
-                            text = { Text("이어보기") },
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.PlayCircle, null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("이어보기")
+                                    if (continueWatching.isNotEmpty()) {
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("(${continueWatching.size})", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                            },
                         )
                         folders.forEach { f ->
                             Tab(
@@ -536,17 +653,22 @@ fun LibraryScreen(
                                     folderPath = ""
                                     selection = HomeSelection.Folder(f.id, "")
                                 },
-                                text = { Text(f.displayName) },
+                                text = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Folder, null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(f.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                },
                             )
                         }
                     }
+
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         when (val s = selection) {
                             is HomeSelection.ContinueWatching -> ContinueWatchingPane(
                                 videos = continueWatching,
                                 threshold = threshold,
-                                useGrid = gridColumnsPhone > 1,
-                                colCount = gridColumnsPhone,
                                 onPlay = playVideoWithFolderContext,
                                 onRefresh = { scanner.scanAll() },
                             )
@@ -556,16 +678,9 @@ fun LibraryScreen(
                                         folderId = s.folderId,
                                         path = folderPath,
                                         onPath = { folderPath = it },
-                                        onBack = {
-                                            if (folderPath.isNotEmpty()) {
-                                                folderPath = if (folderPath.contains('/')) folderPath.substringBeforeLast('/')
-                                                else ""
-                                            } else {
-                                                selection = HomeSelection.ContinueWatching
-                                            }
-                                        },
+                                        onBack = null,
                                         onSettings = onSettings,
-                                        isWideOverride = false,
+                                        showTopBar = false,
                                         onFolderDeleted = {
                                             selection = HomeSelection.ContinueWatching
                                             folderPath = ""
@@ -607,115 +722,33 @@ fun LibraryScreen(
 }
 
 @Composable
-fun ContinueWatchingPane(
-    videos: List<VideoEntity>,
-    threshold: Double,
-    useGrid: Boolean,
-    colCount: Int,
-    onPlay: (VideoEntity) -> Unit,
-    onRefresh: suspend () -> Unit,
-) {
-    PullRefreshWrapper(
-        modifier = Modifier.fillMaxSize(),
-        onRefresh = onRefresh,
-    ) {
-        if (videos.isEmpty()) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState()),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("이어볼 영상이 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
-            }
-        } else if (useGrid) {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(colCount.coerceAtLeast(1)),
-                modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                items(videos, key = { "c" + it.uri }) { v ->
-                    RecentCard(v, threshold) { onPlay(v) }
-                }
-            }
-        } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(videos, key = { "c" + it.uri }) { v ->
-                    RecentRow(v, threshold) { onPlay(v) }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun FolderCard(
-    f: FolderEntity,
-    onOpen: () -> Unit,
-    onDelete: () -> Unit,
-    modifier: Modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-) {
-    val context = LocalContext.current
-    val db = remember { AppDb.get(context) }
-    var count by remember { mutableStateOf(0) }
-    var unseen by remember { mutableStateOf(0) }
-
-    LaunchedEffect(f.id) {
-        val threshold = SettingsRepo(context).watchedThreshold.first()
-        db.videos().observeFolder(f.id).collect { vids ->
-            count = vids.size
-            unseen = vids.count { !it.isWatched(threshold) && it.positionSec == 0.0 }
-        }
-    }
-
-    Card(
-        onClick = onOpen,
-        modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        shape = RoundedCornerShape(12.dp),
-    ) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(f.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Text(
-                    "${count}개 영상" + if (unseen > 0) " · 미시청 $unseen" else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (unseen > 0) MaterialTheme.colorScheme.primary else Color.Gray,
-                )
-            }
-            IconButton(onClick = onDelete) { Icon(Icons.Default.DeleteOutline, "삭제", tint = Color.Gray) }
-        }
-    }
-}
-
-@Composable
 fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
     val watched = v.isWatched(threshold)
     Row(
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Thumb(
             uri = v.uri,
-            modifier = Modifier.size(100.dp, 56.dp).clip(RoundedCornerShape(8.dp)),
+            modifier = Modifier
+                .size(116.dp, 66.dp)
+                .clip(RoundedCornerShape(8.dp)),
             isWatched = watched,
         )
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(
                 v.name,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
             )
-            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (v.dirPath.isNotEmpty()) {
                     Text(v.dirPath, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
@@ -736,35 +769,32 @@ fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
 }
 
 @Composable
-fun RecentCard(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
-    val watched = v.isWatched(threshold)
-    Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+fun ContinueWatchingPane(
+    videos: List<VideoEntity>,
+    threshold: Double,
+    onPlay: (VideoEntity) -> Unit,
+    onRefresh: suspend () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    PullRefreshWrapper(
+        modifier = modifier.fillMaxSize(),
+        onRefresh = onRefresh,
     ) {
-        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Thumb(
-                uri = v.uri,
-                modifier = Modifier.size(88.dp, 50.dp).clip(RoundedCornerShape(6.dp)),
-                isWatched = watched,
-            )
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    v.name,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    pct(v.fraction) + if (watched) " ✓" else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (watched) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary,
-                )
+        if (videos.isEmpty()) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState()),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("이어볼 영상이 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize()) {
+                items(videos, key = { "c" + it.uri }) { v ->
+                    RecentRow(v, threshold) { onPlay(v) }
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                }
             }
         }
     }
@@ -774,7 +804,15 @@ fun RecentCard(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack: (() -> Unit)?, onSettings: () -> Unit, isWideOverride: Boolean? = null, onFolderDeleted: () -> Unit = {}) {
+fun FolderScreen(
+    folderId: Long,
+    path: String,
+    onPath: (String) -> Unit,
+    onBack: (() -> Unit)?,
+    onSettings: () -> Unit,
+    showTopBar: Boolean = true,
+    onFolderDeleted: () -> Unit = {},
+) {
     val context = LocalContext.current
     val db = remember { AppDb.get(context) }
     val scanner = remember { LibraryScanner(context) }
@@ -814,20 +852,15 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
         }
     }
 
-
     BackHandler(enabled = inSelectionMode) {
         selectedUris = emptySet()
     }
-    var gridColumnsTablet by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_TABLET) }
-    var gridColumnsPhone by remember { mutableIntStateOf(SettingsRepo.DEFAULT_GRID_COLUMNS_PHONE) }
 
     LaunchedEffect(folderId) {
         val s = SettingsRepo(context)
         threshold = s.watchedThreshold.first()
         launch(Dispatchers.IO) { folder = db.folders().byId(folderId) }
         launch(Dispatchers.IO) { db.videos().observeFolder(folderId).collect { videos = it } }
-        launch(Dispatchers.IO) { s.gridColumnsTablet.collect { gridColumnsTablet = it } }
-        launch(Dispatchers.IO) { s.gridColumnsPhone.collect { gridColumnsPhone = it } }
     }
 
     val title = folder?.displayName ?: "…"
@@ -858,25 +891,29 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
         selectedUris = if (selectedUris.contains(uri)) selectedUris - uri else selectedUris + uri
     }
 
-    Scaffold(
-        topBar = {
-            if (inSelectionMode) {
-                // Action mode top bar
-                TopAppBar(
-                    navigationIcon = {
+    val folderContent: @Composable (Modifier) -> Unit = { modifier ->
+        Column(modifier.fillMaxSize()) {
+            // If in selection mode and showTopBar is false (narrow screen), show compact action banner
+            if (inSelectionMode && !showTopBar) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         IconButton(onClick = { selectedUris = emptySet() }) {
                             Icon(Icons.Default.Close, "선택 취소")
                         }
-                    },
-                    title = {
                         Text(
                             "${selectedUris.size}개 선택",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
-                            maxLines = 1,
+                            modifier = Modifier.weight(1f),
                         )
-                    },
-                    actions = {
                         val allSelected = here.isNotEmpty() && selectedUris.size == here.size
                         IconButton(onClick = {
                             selectedUris = if (allSelected) emptySet() else here.map { it.uri }.toSet()
@@ -895,282 +932,247 @@ fun FolderScreen(folderId: Long, path: String, onPath: (String) -> Unit, onBack:
                         }) {
                             Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
                         }
-                        var showBatchMenu by remember { mutableStateOf(false) }
-                        Box {
-                            IconButton(onClick = { showBatchMenu = true }) {
-                                Icon(Icons.Default.MoreVert, "작업 더보기")
-                            }
-                            DropdownMenu(
-                                expanded = showBatchMenu,
-                                onDismissRequest = { showBatchMenu = false },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("시청 완료로 표시") },
-                                    leadingIcon = { Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF2E7D32)) },
-                                    onClick = {
-                                        val uris = selectedUris.toList()
-                                        scope.launch(Dispatchers.IO) { db.videos().setOverrideBatch(uris, 1) }
-                                        selectedUris = emptySet()
-                                        showBatchMenu = false
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("미시청으로 표시") },
-                                    leadingIcon = { Icon(Icons.Default.RemoveDone, null) },
-                                    onClick = {
-                                        val uris = selectedUris.toList()
-                                        scope.launch(Dispatchers.IO) { db.videos().setOverrideBatch(uris, -1) }
-                                        selectedUris = emptySet()
-                                        showBatchMenu = false
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("재생 기록 초기화") },
-                                    leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
-                                    onClick = {
-                                        val uris = selectedUris.toList()
-                                        scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(uris) }
-                                        selectedUris = emptySet()
-                                        showBatchMenu = false
-                                    },
-                                )
-                                HorizontalDivider()
-                                DropdownMenuItem(
-                                    text = { Text("선택 삭제", color = MaterialTheme.colorScheme.error) },
-                                    leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                                    onClick = {
-                                        deleteTargetUris = selectedUris.toList()
-                                        showDeleteDialog = true
-                                        showBatchMenu = false
-                                    },
-                                )
-                            }
+                    }
+                }
+            }
+
+            // Search & Filter controls
+            Row(
+                Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it },
+                    placeholder = { Text("파일명 검색") },
+                    singleLine = true, modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    trailingIcon = {
+                        if (query.isNotEmpty()) IconButton(onClick = { query = "" }) {
+                            Icon(Icons.Default.Close, "지우기")
                         }
                     },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 )
-            } else {
-                TopAppBar(
-                    title = { Text(crumbs.joinToString(" / "), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    navigationIcon = {
-                        if (onBack != null) {
-                            IconButton(onClick = onBack) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "뒤로가기")
-                            }
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
-                            Icon(Icons.Default.Refresh, "새로고침")
-                        }
-                        IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
-                        IconButton(onClick = {
-                            if (here.isNotEmpty()) selectedUris = setOf(here.first().uri)
-                        }) {
-                            Icon(Icons.Default.Checklist, "선택 모드")
-                        }
-                        var showUnregisterDialog by remember { mutableStateOf(false) }
-                        IconButton(onClick = { showUnregisterDialog = true }) {
-                            Icon(Icons.Default.DeleteOutline, "폴더 등록 해제")
-                        }
-                        if (showUnregisterDialog) {
-                            AlertDialog(
-                                onDismissRequest = { showUnregisterDialog = false },
-                                title = { Text("폴더 등록 해제") },
-                                text = { Text("이 폴더를 라이브러리에서 제외합니다. 실제 파일은 삭제되지 않습니다.") },
-                                confirmButton = {
-                                    TextButton(onClick = {
-                                        showUnregisterDialog = false
-                                        scope.launch(Dispatchers.IO) {
-                                            val f = db.folders().byId(folderId)
-                                            db.folders().delete(folderId)
-                                            db.videos().deleteForFolder(folderId)
-                                            f?.let { runCatching { LibraryScanner.releasePermission(context, Uri.parse(it.treeUri)) } }
-                                            kotlinx.coroutines.withContext(Dispatchers.Main) { onFolderDeleted() }
-                                        }
-                                    }) { Text("해제", color = MaterialTheme.colorScheme.error) }
-                                },
-                                dismissButton = {
-                                    TextButton(onClick = { showUnregisterDialog = false }) { Text("취소") }
-                                },
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                IconButton(onClick = { sortByName = !sortByName }) {
+                    Icon(if (sortByName) Icons.Default.SortByAlpha else Icons.Default.History, "정렬")
+                }
+                FilterChip(
+                    selected = unseenOnly, onClick = { unseenOnly = !unseenOnly },
+                    label = { Text("미시청") },
+                    shape = RoundedCornerShape(8.dp),
                 )
             }
-        },
-    ) { pad ->
-        BoxWithConstraints(
-            Modifier
-                .padding(pad)
-                .fillMaxSize(),
-        ) {
-            val isWide = isWideOverride ?: (maxWidth >= 600.dp)
-            Column(Modifier.fillMaxSize()) {
-                // Search & Filter controls
-                Row(
-                    Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedTextField(
-                        value = query, onValueChange = { query = it },
-                        placeholder = { Text("파일명 검색") },
-                        singleLine = true, modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp),
-                        trailingIcon = {
-                            if (query.isNotEmpty()) IconButton(onClick = { query = "" }) {
-                                Icon(Icons.Default.Close, "지우기")
-                            }
-                        },
-                    )
-                    IconButton(onClick = { sortByName = !sortByName }) {
-                        Icon(if (sortByName) Icons.Default.SortByAlpha else Icons.Default.History, "정렬")
-                    }
-                    FilterChip(
-                        selected = unseenOnly, onClick = { unseenOnly = !unseenOnly },
-                        label = { Text("미시청") },
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                }
 
-                val useGrid = isWide || gridColumnsPhone > 1
-                val colCount = if (isWide) gridColumnsTablet else gridColumnsPhone
-
-                if (useGrid) {
-                    // Wide adaptive grid or phone grid
-                    PullRefreshWrapper(
-                        modifier = Modifier.weight(1f).padding(horizontal = 16.dp),
-                        onRefresh = { scanner.scanAll() },
-                    ) {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(colCount),
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        if (subDirs.isNotEmpty()) {
-                            item(span = { GridItemSpan(maxLineSpan) }) {
-                                Text("하위 폴더", style = MaterialTheme.typography.titleSmall, color = Color.Gray, modifier = Modifier.padding(top = 4.dp))
-                            }
-                            items(subDirs, key = { "d$folderId$it" }) { d ->
-                                Card(
-                                    onClick = { onPath(if (path.isEmpty()) d else "$path/$d") },
-                                    shape = RoundedCornerShape(10.dp),
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                                ) {
-                                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.SubdirectoryArrowRight, null, tint = MaterialTheme.colorScheme.primary)
-                                        Spacer(Modifier.width(10.dp))
-                                        Text(d, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                                    }
-                                }
-                            }
-                        }
-                        if (here.isNotEmpty()) {
-                            item(span = { GridItemSpan(maxLineSpan) }) {
-                                Text("동영상 목록 (${here.size})", style = MaterialTheme.typography.titleSmall, color = Color.Gray, modifier = Modifier.padding(top = 8.dp))
-                            }
-                            items(here, key = { it.uri }) { v ->
-                                val isSelected = selectedUris.contains(v.uri)
-                                VideoGridCard(
-                                    v = v,
-                                    threshold = threshold,
-                                    isSelected = isSelected,
-                                    inSelectionMode = inSelectionMode,
-                                    onClick = {
-                                        if (inSelectionMode) toggleSelect(v.uri)
-                                        else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
-                                    },
-                                    onLongClick = { toggleSelect(v.uri) },
-                                    onActionWatched = {
-                                        val next = if (v.isWatched(threshold)) -1 else 1
-                                        scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
-                                    },
-                                    onActionReset = {
-                                        scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
-                                    },
-                                    onActionDelete = {
-                                        deleteTargetUris = listOf(v.uri)
-                                        showDeleteDialog = true
-                                    },
-                                )
-                            }
-                        }
-                        if (subDirs.isEmpty() && here.isEmpty()) {
-                            item(span = { GridItemSpan(maxLineSpan) }) {
-                                Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        if (path.isEmpty()) "영상이 없습니다. 새로고침(⟳)해 보세요." else "이 폴더에 영상이 없습니다.",
-                                        color = Color.Gray,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    }
-                } else {
-                    // Mobile list view
-                    PullRefreshWrapper(
-                        modifier = Modifier.weight(1f),
-                        onRefresh = { scanner.scanAll() },
-                    ) {
-                    LazyColumn(Modifier.fillMaxSize()) {
+            // All videos and subfolders in clean LIST format (No grid)
+            PullRefreshWrapper(
+                modifier = Modifier.weight(1f),
+                onRefresh = { scanner.scanAll() },
+            ) {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    if (subDirs.isNotEmpty()) {
                         items(subDirs, key = { "d$folderId$it" }) { d ->
                             Row(
-                                Modifier.fillMaxWidth()
+                                Modifier
+                                    .fillMaxWidth()
                                     .clickable { onPath(if (path.isEmpty()) d else "$path/$d") }
                                     .padding(horizontal = 16.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(Icons.Default.SubdirectoryArrowRight, null, tint = Color.Gray)
+                                Icon(Icons.Default.SubdirectoryArrowRight, null, tint = MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.width(12.dp))
                                 Text(d, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                             }
-                            HorizontalDivider()
-                        }
-                        items(here, key = { it.uri }) { v ->
-                            val isSelected = selectedUris.contains(v.uri)
-                            VideoRow(
-                                v = v,
-                                threshold = threshold,
-                                isSelected = isSelected,
-                                inSelectionMode = inSelectionMode,
-                                onClick = {
-                                    if (inSelectionMode) toggleSelect(v.uri)
-                                    else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
-                                },
-                                onLongClick = { toggleSelect(v.uri) },
-                                onActionWatched = {
-                                    val next = if (v.isWatched(threshold)) -1 else 1
-                                    scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
-                                },
-                                onActionReset = {
-                                    scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
-                                },
-                                onActionDelete = {
-                                    deleteTargetUris = listOf(v.uri)
-                                    showDeleteDialog = true
-                                },
-                            )
                             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                         }
-                        if (subDirs.isEmpty() && here.isEmpty()) {
-                            item {
-                                Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        if (path.isEmpty()) "영상이 없습니다. 새로고침(⟳)해 보세요." else "이 폴더에 영상이 없습니다.",
-                                        color = Color.Gray,
-                                    )
-                                }
+                    }
+                    items(here, key = { it.uri }) { v ->
+                        val isSelected = selectedUris.contains(v.uri)
+                        VideoRow(
+                            v = v,
+                            threshold = threshold,
+                            isSelected = isSelected,
+                            inSelectionMode = inSelectionMode,
+                            onClick = {
+                                if (inSelectionMode) toggleSelect(v.uri)
+                                else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
+                            },
+                            onLongClick = { toggleSelect(v.uri) },
+                            onActionWatched = {
+                                val next = if (v.isWatched(threshold)) -1 else 1
+                                scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
+                            },
+                            onActionReset = {
+                                scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
+                            },
+                            onActionDelete = {
+                                deleteTargetUris = listOf(v.uri)
+                                showDeleteDialog = true
+                            },
+                        )
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                    }
+                    if (subDirs.isEmpty() && here.isEmpty()) {
+                        item {
+                            Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
+                                Text(
+                                    if (path.isEmpty()) "영상이 없습니다. 새로고침(⟳)해 보세요." else "이 폴더에 영상이 없습니다.",
+                                    color = Color.Gray,
+                                )
                             }
                         }
-                    }
                     }
                 }
             }
         }
+    }
+
+    if (showTopBar) {
+        Scaffold(
+            topBar = {
+                if (inSelectionMode) {
+                    TopAppBar(
+                        navigationIcon = {
+                            IconButton(onClick = { selectedUris = emptySet() }) {
+                                Icon(Icons.Default.Close, "선택 취소")
+                            }
+                        },
+                        title = {
+                            Text(
+                                "${selectedUris.size}개 선택",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                            )
+                        },
+                        actions = {
+                            val allSelected = here.isNotEmpty() && selectedUris.size == here.size
+                            IconButton(onClick = {
+                                selectedUris = if (allSelected) emptySet() else here.map { it.uri }.toSet()
+                            }) {
+                                Icon(if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll, "모두 선택")
+                            }
+                            IconButton(onClick = {
+                                val list = here.filter { selectedUris.contains(it.uri) }.map { it.uri }
+                                if (list.isNotEmpty()) PlayerActivity.start(context, list, 0)
+                            }) {
+                                Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
+                            }
+                            IconButton(onClick = {
+                                deleteTargetUris = selectedUris.toList()
+                                showDeleteDialog = true
+                            }) {
+                                Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
+                            }
+                            var showBatchMenu by remember { mutableStateOf(false) }
+                            Box {
+                                IconButton(onClick = { showBatchMenu = true }) {
+                                    Icon(Icons.Default.MoreVert, "작업 더보기")
+                                }
+                                DropdownMenu(
+                                    expanded = showBatchMenu,
+                                    onDismissRequest = { showBatchMenu = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("시청 완료로 표시") },
+                                        leadingIcon = { Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF2E7D32)) },
+                                        onClick = {
+                                            val uris = selectedUris.toList()
+                                            scope.launch(Dispatchers.IO) { db.videos().setOverrideBatch(uris, 1) }
+                                            selectedUris = emptySet()
+                                            showBatchMenu = false
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("미시청으로 표시") },
+                                        leadingIcon = { Icon(Icons.Default.RemoveDone, null) },
+                                        onClick = {
+                                            val uris = selectedUris.toList()
+                                            scope.launch(Dispatchers.IO) { db.videos().setOverrideBatch(uris, -1) }
+                                            selectedUris = emptySet()
+                                            showBatchMenu = false
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("재생 기록 초기화") },
+                                        leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
+                                        onClick = {
+                                            val uris = selectedUris.toList()
+                                            scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(uris) }
+                                            selectedUris = emptySet()
+                                            showBatchMenu = false
+                                        },
+                                    )
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text("선택 삭제", color = MaterialTheme.colorScheme.error) },
+                                        leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                                        onClick = {
+                                            deleteTargetUris = selectedUris.toList()
+                                            showDeleteDialog = true
+                                            showBatchMenu = false
+                                        },
+                                    )
+                                }
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    )
+                } else {
+                    TopAppBar(
+                        title = { Text(crumbs.joinToString(" / "), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        navigationIcon = {
+                            if (onBack != null) {
+                                IconButton(onClick = onBack) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "뒤로가기")
+                                }
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
+                                Icon(Icons.Default.Refresh, "새로고침")
+                            }
+                            IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
+                            IconButton(onClick = {
+                                if (here.isNotEmpty()) selectedUris = setOf(here.first().uri)
+                            }) {
+                                Icon(Icons.Default.Checklist, "선택 모드")
+                            }
+                            var showUnregisterDialog by remember { mutableStateOf(false) }
+                            IconButton(onClick = { showUnregisterDialog = true }) {
+                                Icon(Icons.Default.DeleteOutline, "폴더 등록 해제")
+                            }
+                            if (showUnregisterDialog) {
+                                AlertDialog(
+                                    onDismissRequest = { showUnregisterDialog = false },
+                                    title = { Text("폴더 등록 해제") },
+                                    text = { Text("이 폴더를 라이브러리에서 제외합니다. 실제 파일은 삭제되지 않습니다.") },
+                                    confirmButton = {
+                                        TextButton(onClick = {
+                                            showUnregisterDialog = false
+                                            scope.launch(Dispatchers.IO) {
+                                                val f = db.folders().byId(folderId)
+                                                db.folders().delete(folderId)
+                                                db.videos().deleteForFolder(folderId)
+                                                f?.let { runCatching { LibraryScanner.releasePermission(context, Uri.parse(it.treeUri)) } }
+                                                kotlinx.coroutines.withContext(Dispatchers.Main) { onFolderDeleted() }
+                                            }
+                                        }) { Text("해제", color = MaterialTheme.colorScheme.error) }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { showUnregisterDialog = false }) { Text("취소") }
+                                    },
+                                )
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                    )
+                }
+            },
+        ) { pad ->
+            folderContent(Modifier.padding(pad))
+        }
+    } else {
+        folderContent(Modifier)
     }
 
     // Delete confirmation dialog
