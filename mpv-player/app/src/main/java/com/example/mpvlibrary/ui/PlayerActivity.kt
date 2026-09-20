@@ -83,11 +83,7 @@ enum class AspectRatioMode(val title: String, val shortTitle: String) {
     ORIGINAL("원본 크기 (1:1)", "1:1");
 }
 
-enum class ScreenRotationMode(val label: String) {
-    SENSOR("자동 회전 (4방향 전체 센서)"),
-    LANDSCAPE("가로 모드 (양방향 센서)"),
-    PORTRAIT("세로 모드 (양방향 센서)");
-}
+// 자동 회전 ON: 4방향 전체 센서. OFF: 토글 시점의 현재 방향으로 고정.
 
 enum class HudMode {
     NONE, BRIGHTNESS, VOLUME, SEEK, DOUBLE_TAP, FAST_PLAY, ZOOM, ASPECT, PLAY_PAUSE
@@ -171,7 +167,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var isScrubbing by mutableStateOf(false)
     private var scrubPosition by mutableStateOf(0.0)
     private var currentAspectMode by mutableStateOf(AspectRatioMode.BEST_FIT)
-    private var rotationMode by mutableStateOf(ScreenRotationMode.SENSOR)
+    private var autoRotate by mutableStateOf(true)
     private var controlsTimerJob: Job? = null
 
     // Dialog states
@@ -871,19 +867,27 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         resetControlsTimer()
     }
 
-    private fun cycleScreenRotation() {
-        val next = when (rotationMode) {
-            ScreenRotationMode.SENSOR -> ScreenRotationMode.LANDSCAPE
-            ScreenRotationMode.LANDSCAPE -> ScreenRotationMode.PORTRAIT
-            ScreenRotationMode.PORTRAIT -> ScreenRotationMode.SENSOR
+    private fun toggleAutoRotate() {
+        if (autoRotate) {
+            val rotation = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                display?.rotation ?: android.view.Surface.ROTATION_0
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.rotation
+            }
+            requestedOrientation = when (rotation) {
+                android.view.Surface.ROTATION_90 -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                android.view.Surface.ROTATION_270 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+                android.view.Surface.ROTATION_180 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+                else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+            autoRotate = false
+            showHud(HudMode.ASPECT, "회전 잠금 (현재 방향 고정)")
+        } else {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+            autoRotate = true
+            showHud(HudMode.ASPECT, "자동 회전 켬 (4방향)")
         }
-        rotationMode = next
-        requestedOrientation = when (next) {
-            ScreenRotationMode.SENSOR -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-            ScreenRotationMode.LANDSCAPE -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            ScreenRotationMode.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
-        }
-        showHud(HudMode.ASPECT, "화면 회전: ${next.label}")
         resetControlsTimer()
     }
 
@@ -1304,11 +1308,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     )
                 }
 
-                // Screen Rotation Toggle Button
-                IconButton(onClick = { cycleScreenRotation() }) {
+                // Auto-rotate toggle: ON = 4-way sensor, OFF = lock current orientation
+                IconButton(onClick = { toggleAutoRotate() }) {
                     Icon(
-                        Icons.Default.ScreenRotation, "화면 회전",
-                        tint = if (rotationMode == ScreenRotationMode.SENSOR) MaterialTheme.colorScheme.primary else Color.White,
+                        if (autoRotate) Icons.Default.ScreenRotation else Icons.Default.ScreenLockRotation, "자동 회전",
+                        tint = if (autoRotate) MaterialTheme.colorScheme.primary else Color.White,
                     )
                 }
 
