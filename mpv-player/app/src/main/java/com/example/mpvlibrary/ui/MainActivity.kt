@@ -335,6 +335,16 @@ fun LibraryScreen(
     var selection by remember { mutableStateOf<HomeSelection>(HomeSelection.ContinueWatching) }
     var folderPath by remember { mutableStateOf("") }
 
+    // Back: sub-folder -> folder root -> 이어보기 (so every entry/exit path stays reachable).
+    // Single handler: folder root pops to 이어보기 instead of swallowing the event.
+    BackHandler(enabled = selection is HomeSelection.Folder) {
+        if (folderPath.isNotEmpty()) {
+            folderPath = if (folderPath.contains('/')) folderPath.substringBeforeLast('/') else ""
+        } else {
+            selection = HomeSelection.ContinueWatching
+        }
+    }
+
     LaunchedEffect(Unit) {
         val s = SettingsRepo(context)
         threshold = s.watchedThreshold.first()
@@ -405,40 +415,70 @@ fun LibraryScreen(
             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
         },
     ) {
+        var isWidePanel by remember { mutableStateOf(false) }
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val isWide = maxWidth >= 600.dp
+            LaunchedEffect(isWide) { isWidePanel = isWide }
             if (isWide) {
                 Row(Modifier.fillMaxSize()) {
-                    // Left sidebar: 이어보기 + registered folders
-                    NavigationRail(
-                        modifier = Modifier.fillMaxHeight(),
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    // Left sidebar: 이어보기 + registered folders (custom rail: full labels, no squeeze).
+                    Column(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .width(200.dp)
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .verticalScroll(rememberScrollState())
+                            .padding(vertical = 8.dp),
                     ) {
-                        Spacer(Modifier.height(8.dp))
-                        NavigationRailItem(
-                            selected = selection is HomeSelection.ContinueWatching,
-                            onClick = { selection = HomeSelection.ContinueWatching },
-                            icon = { Icon(Icons.Default.PlayCircle, null) },
-                            label = { Text("이어보기", maxLines = 1) },
-                        )
-                        HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                        LazyColumn(
-                            modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(vertical = 4.dp),
-                        ) {
-                            items(folders, key = { it.id }) { f ->
-                                val selected = selection is HomeSelection.Folder &&
-                                    (selection as HomeSelection.Folder).folderId == f.id
-                                NavigationRailItem(
-                                    selected = selected,
-                                    onClick = {
-                                        folderPath = ""
-                                        selection = HomeSelection.Folder(f.id, "")
-                                    },
-                                    icon = { Icon(Icons.Default.Folder, null) },
-                                    label = { Text(f.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                )
+                        val railItem: @Composable (selected: Boolean, onClick: () -> Unit, icon: @Composable () -> Unit, label: String) -> Unit =
+                            { selected, onClick, icon, label ->
+                                val bg = if (selected) MaterialTheme.colorScheme.secondaryContainer
+                                else Color.Transparent
+                                val fg = if (selected) MaterialTheme.colorScheme.onSecondaryContainer
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                                Surface(
+                                    onClick = onClick,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = bg,
+                                ) {
+                                    Column(
+                                        Modifier.padding(vertical = 10.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                    ) {
+                                        CompositionLocalProvider(LocalContentColor provides fg) { icon() }
+                                        Spacer(Modifier.height(4.dp))
+                                        Text(
+                                            label,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = fg,
+                                        )
+                                    }
+                                }
                             }
+                        railItem(
+                            selection is HomeSelection.ContinueWatching,
+                            { selection = HomeSelection.ContinueWatching },
+                            { Icon(Icons.Default.PlayCircle, null) },
+                            "이어보기",
+                        )
+                        HorizontalDivider(Modifier.padding(vertical = 8.dp, horizontal = 12.dp))
+                        folders.forEach { f ->
+                            val selected = selection is HomeSelection.Folder &&
+                                (selection as HomeSelection.Folder).folderId == f.id
+                            railItem(
+                                selected,
+                                {
+                                    folderPath = ""
+                                    selection = HomeSelection.Folder(f.id, "")
+                                },
+                                { Icon(Icons.Default.Folder, null) },
+                                f.displayName,
+                            )
                         }
                     }
                     VerticalDivider()
@@ -473,74 +513,64 @@ fun LibraryScreen(
                     }
                 }
             } else {
-                // Narrow: full-width content without an extra tap to enter a folder.
+                // Narrow: tab strip (이어보기 + folders) always visible, content below it.
                 val sel = selection
-                if (sel is HomeSelection.Folder && folders.size <= 1) {
-                    key(sel.folderId, folderPath) {
-                        FolderScreen(
-                            folderId = sel.folderId,
-                            path = folderPath,
-                            onPath = { folderPath = it },
-                            onBack = null,
-                            onSettings = onSettings,
-                            isWideOverride = false,
-                            onFolderDeleted = {
-                                selection = HomeSelection.ContinueWatching
-                                folderPath = ""
-                            },
+                Column(Modifier.fillMaxSize()) {
+                    // Sidebar-equivalent selector on top: 이어보기 + folders as chips/tabs.
+                    ScrollableTabRow(
+                        selectedTabIndex = when (sel) {
+                            is HomeSelection.ContinueWatching -> 0
+                            is HomeSelection.Folder -> 1 + folders.indexOfFirst { it.id == sel.folderId }.coerceAtLeast(0)
+                        },
+                        edgePadding = 16.dp,
+                    ) {
+                        Tab(
+                            selected = sel is HomeSelection.ContinueWatching,
+                            onClick = { selection = HomeSelection.ContinueWatching },
+                            text = { Text("이어보기") },
                         )
-                    }
-                } else {
-                    Column(Modifier.fillMaxSize()) {
-                        // Sidebar-equivalent selector on top: 이어보기 + folders as chips/tabs.
-                        ScrollableTabRow(
-                            selectedTabIndex = when (sel) {
-                                is HomeSelection.ContinueWatching -> 0
-                                is HomeSelection.Folder -> 1 + folders.indexOfFirst { it.id == sel.folderId }.coerceAtLeast(0)
-                            },
-                            edgePadding = 16.dp,
-                        ) {
+                        folders.forEach { f ->
                             Tab(
-                                selected = sel is HomeSelection.ContinueWatching,
-                                onClick = { selection = HomeSelection.ContinueWatching },
-                                text = { Text("이어보기") },
+                                selected = sel is HomeSelection.Folder && sel.folderId == f.id,
+                                onClick = {
+                                    folderPath = ""
+                                    selection = HomeSelection.Folder(f.id, "")
+                                },
+                                text = { Text(f.displayName) },
                             )
-                            folders.forEach { f ->
-                                Tab(
-                                    selected = sel is HomeSelection.Folder && sel.folderId == f.id,
-                                    onClick = {
-                                        folderPath = ""
-                                        selection = HomeSelection.Folder(f.id, "")
-                                    },
-                                    text = { Text(f.displayName) },
-                                )
-                            }
                         }
-                        Box(Modifier.weight(1f).fillMaxWidth()) {
-                            when (val s = selection) {
-                                is HomeSelection.ContinueWatching -> ContinueWatchingPane(
-                                    videos = continueWatching,
-                                    threshold = threshold,
-                                    useGrid = gridColumnsPhone > 1,
-                                    colCount = gridColumnsPhone,
-                                    onPlay = playVideoWithFolderContext,
-                                    onRefresh = { scanner.scanAll() },
-                                )
-                                is HomeSelection.Folder -> {
-                                    key(s.folderId, folderPath) {
-                                        FolderScreen(
-                                            folderId = s.folderId,
-                                            path = folderPath,
-                                            onPath = { folderPath = it },
-                                            onBack = null,
-                                            onSettings = onSettings,
-                                            isWideOverride = false,
-                                            onFolderDeleted = {
+                    }
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        when (val s = selection) {
+                            is HomeSelection.ContinueWatching -> ContinueWatchingPane(
+                                videos = continueWatching,
+                                threshold = threshold,
+                                useGrid = gridColumnsPhone > 1,
+                                colCount = gridColumnsPhone,
+                                onPlay = playVideoWithFolderContext,
+                                onRefresh = { scanner.scanAll() },
+                            )
+                            is HomeSelection.Folder -> {
+                                key(s.folderId, folderPath) {
+                                    FolderScreen(
+                                        folderId = s.folderId,
+                                        path = folderPath,
+                                        onPath = { folderPath = it },
+                                        onBack = {
+                                            if (folderPath.isNotEmpty()) {
+                                                folderPath = if (folderPath.contains('/')) folderPath.substringBeforeLast('/')
+                                                else ""
+                                            } else {
                                                 selection = HomeSelection.ContinueWatching
-                                                folderPath = ""
-                                            },
-                                        )
-                                    }
+                                            }
+                                        },
+                                        onSettings = onSettings,
+                                        isWideOverride = false,
+                                        onFolderDeleted = {
+                                            selection = HomeSelection.ContinueWatching
+                                            folderPath = ""
+                                        },
+                                    )
                                 }
                             }
                         }
