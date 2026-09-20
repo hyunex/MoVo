@@ -13,6 +13,9 @@ import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import android.content.res.Configuration
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -211,6 +214,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         AppLog.install(this)
         AppLog.i(TAG, "PlayerActivity created (items=${intent.getStringArrayListExtra(EXTRA_URIS)?.size ?: 0})")
@@ -244,6 +248,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
+                LaunchedEffect(controlsVisible, isLocked) { updateSystemBars() }
                 // External subtitle file picker launcher
                 val subPicker = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument(),
@@ -2109,6 +2114,27 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         if (level <= MPVLib.MpvLogLevel.MPV_LOG_LEVEL_WARN) {
             AppLog.line("M", prefix, text.trim())
         }
+    }
+
+    private fun updateSystemBars() {
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (controlsVisible && !isLocked) {
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateSystemBars()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) updateSystemBars()
     }
 
     override fun onPause() {
