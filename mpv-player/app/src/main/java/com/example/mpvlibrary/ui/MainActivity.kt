@@ -301,6 +301,7 @@ private sealed interface HomeSelection {
     data class Folder(val folderId: Long, val path: String) : HomeSelection
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SidebarItem(
     icon: @Composable () -> Unit,
@@ -308,17 +309,14 @@ fun SidebarItem(
     badge: Int? = null,
     selected: Boolean,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val bg = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
     val fg = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-    Surface(
-        onClick = onClick,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-        shape = RoundedCornerShape(12.dp),
-        color = bg,
-    ) {
+    // Long-press 지원 시 Surface 자체 onClick을 비우고 combinedClickable 하나로 통합
+    // (Surface onClick이 제스처를 선점하면 롱프레스가 발동하지 않음).
+    @Composable
+    fun itemContent() {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -346,8 +344,21 @@ fun SidebarItem(
             }
         }
     }
+    val itemModifier = Modifier
+        .fillMaxWidth()
+        .padding(horizontal = 8.dp, vertical = 2.dp)
+        .then(
+            if (onLongClick != null) Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+            else Modifier
+        )
+    if (onLongClick != null) {
+        Surface(modifier = itemModifier, shape = RoundedCornerShape(12.dp), color = bg) { itemContent() }
+    } else {
+        Surface(onClick = onClick, modifier = itemModifier, shape = RoundedCornerShape(12.dp), color = bg) { itemContent() }
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
     onSettings: () -> Unit,
@@ -377,6 +388,9 @@ fun LibraryScreen(
 
     var selection by remember { mutableStateOf<HomeSelection>(HomeSelection.ContinueWatching) }
     var folderPath by remember { mutableStateOf("") }
+    var unregisterTarget by remember { mutableStateOf<FolderEntity?>(null) }
+
+    fun requestFolderUnregister(f: FolderEntity) { unregisterTarget = f }
 
     // Back: sub-folder -> folder root -> 이어보기 (so every entry/exit path stays reachable).
     BackHandler(enabled = selection is HomeSelection.Folder) {
@@ -511,6 +525,7 @@ fun LibraryScreen(
                                     folderPath = ""
                                     selection = HomeSelection.Folder(f.id, "")
                                 },
+                                onLongClick = { requestFolderUnregister(f) },
                             )
                         }
                     }
@@ -659,7 +674,16 @@ fun LibraryScreen(
                                     selection = HomeSelection.Folder(f.id, "")
                                 },
                                 text = {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.combinedClickable(
+                                            onClick = {
+                                                folderPath = ""
+                                                selection = HomeSelection.Folder(f.id, "")
+                                            },
+                                            onLongClick = { requestFolderUnregister(f) },
+                                        ),
+                                    ) {
                                         Icon(Icons.Default.Folder, null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(6.dp))
                                         Text(f.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -703,6 +727,37 @@ fun LibraryScreen(
                 }
             }
         }
+    }
+
+    if (unregisterTarget != null) {
+        val target = unregisterTarget!!
+        AlertDialog(
+            onDismissRequest = { unregisterTarget = null },
+            title = { Text("폴더 등록 해제") },
+            text = { Text("\"${target.displayName}\" 폴더를 라이브러리에서 제외합니다. 실제 파일은 삭제되지 않습니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    unregisterTarget = null
+                    scope.launch(Dispatchers.IO) {
+                        val f = db.folders().byId(target.id)
+                        db.folders().delete(target.id)
+                        db.videos().deleteForFolder(target.id)
+                        f?.let { runCatching { LibraryScanner.releasePermission(context, Uri.parse(it.treeUri)) } }
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            if (selection is HomeSelection.Folder &&
+                                (selection as HomeSelection.Folder).folderId == target.id
+                            ) {
+                                selection = HomeSelection.ContinueWatching
+                                folderPath = ""
+                            }
+                        }
+                    }
+                }) { Text("해제", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { unregisterTarget = null }) { Text("취소") }
+            },
+        )
     }
 
     if (showStartupPermDialog) {
