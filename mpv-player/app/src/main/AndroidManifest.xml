@@ -2,17 +2,18 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- SAF(OpenDocumentTree/DocumentFile) 전용: MANAGE/WRITE 없이 동작. 구형 단말(MediaStore 썸네일 등) 읽기 호환용으로 READ만 유지. -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="false"
         android:icon="@drawable/ic_launcher"
         android:label="MoVo"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:networkSecurityConfig="@xml/network_security_config">
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"

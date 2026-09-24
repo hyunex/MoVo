@@ -13,6 +13,7 @@ class LibraryScanner(private val context: Context) {
     private val db = AppDb.get(context)
 
     companion object {
+        const val MAX_SCAN_DEPTH = 24
         val VIDEO_EXTENSIONS = setOf(
             "mp4", "mkv", "webm", "avi", "mov", "m4v", "ts", "flv", "wmv",
             "mpg", "mpeg", "3gp", "rmvb", "vob", "ogv", "opus-video", "mp3video",
@@ -59,7 +60,7 @@ class LibraryScanner(private val context: Context) {
     suspend fun scan(folder: FolderEntity) = withContext(Dispatchers.IO) {
         val root = DocumentFile.fromTreeUri(context, Uri.parse(folder.treeUri)) ?: return@withContext
         val found = ArrayList<String>()
-        walk(root, "", found, folder.id)
+        walk(root, "", found, folder.id, 0)
         // Files deleted or moved out of the tree must disappear from the library.
         db.videos().deleteStale(folder.id, found.ifEmpty { listOf("__none__") })
     }
@@ -77,12 +78,21 @@ class LibraryScanner(private val context: Context) {
         AppLog.i("library", "scan finished")
     }
 
-    private suspend fun walk(dir: DocumentFile, prefix: String, found: MutableList<String>, folderId: Long) {
+    private suspend fun walk(dir: DocumentFile, prefix: String, found: MutableList<String>, folderId: Long, depth: Int = 0) {
+        if (depth > MAX_SCAN_DEPTH) {
+            AppLog.w("library", "scan depth limit reached at $prefix")
+            return
+        }
         val children = runCatching { dir.listFiles() }.getOrNull() ?: return
         for (child in children) {
             val name = child.name ?: continue
+            if (name == "." || name == "..") continue
             if (child.isDirectory) {
-                walk(child, if (prefix.isEmpty()) name else "$prefix/$name", found, folderId)
+                if (depth + 1 > MAX_SCAN_DEPTH) {
+                    AppLog.w("library", "scan depth limit reached at $prefix/$name")
+                    continue
+                }
+                walk(child, if (prefix.isEmpty()) name else "$prefix/$name", found, folderId, depth + 1)
             } else if (child.isFile && isVideo(name)) {
                 val uri = child.uri.toString()
                 found.add(uri)

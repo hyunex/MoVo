@@ -63,7 +63,7 @@ object AppLog {
         sb.append("\n\n--- recent log ---\n")
         sb.append(buf.toList().takeLast(200).joinToString("\n"))
         sb.append("\n")
-        File(d, name).writeText(sb.toString())
+        File(d, name).writeText(maskPaths(sb.toString()))
         pruneCrashLocked()
     }
 
@@ -158,6 +158,10 @@ object AppLog {
         val size = files.sumOf { it.length() }
         return "메모리 ${buf.size}줄 · 파일 ${files.size}개 (${size / 1024}KB) · ${Build.MODEL} API ${Build.VERSION.SDK_INT}"
     }
+
+    /** 절대경로 유출 방지: 공유/저장 전에 사용자 경로를 마스킹. */
+    fun maskPaths(text: String): String =
+        text.replace(Regex("/(storage|data|sdcard)[^ \t\n\"]*"), "<path>")
 
     fun shareIntent(ctx: Context): Intent? {
         val d = dir ?: return null

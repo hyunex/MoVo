@@ -237,8 +237,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
 
         settings = SettingsRepo(this)
-        uris = intent.getStringArrayListExtra(EXTRA_URIS) ?: arrayListOf()
-        index = intent.getIntExtra(EXTRA_INDEX, 0)
+        // 외부 Intent 경계값 방어: 빈 목록/음수/초과 인덱스는 0으로 정규화.
+        uris = (intent.getStringArrayListExtra(EXTRA_URIS) ?: arrayListOf())
+            .filter { it.isNotBlank() }.take(500).let { ArrayList(it) }
+        index = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, maxOf(0, uris.size - 1))
+        if (uris.isEmpty()) {
+            fail("재생할 영상이 없음")
+            finish()
+            return
+        }
         initMediaSession()
         requestAudioFocus()
 

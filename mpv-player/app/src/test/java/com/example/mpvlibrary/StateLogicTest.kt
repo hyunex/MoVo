@@ -67,6 +67,32 @@ class StateLogicTest {
         assertFalse(SettingsRepo.isBlockedOption("hwdec"))
     }
 
+    @Test fun mpvBlockedOptionDashBypassClosed() {
+        // "--config-dir"처럼 대시를 붙여도 차단되어야 한다.
+        assertTrue(SettingsRepo.isBlockedOption("--config-dir"))
+        assertTrue(SettingsRepo.isBlockedOption("---load-script"))
+        assertTrue(SettingsRepo.isBlockedOption("-- input-conf"))
+        assertTrue(SettingsRepo.isBlockedOption("sub-file"))
+        assertTrue(SettingsRepo.isBlockedOption("--ytdl-path"))
+        assertTrue(SettingsRepo.isBlockedOption("--stream-dump"))
+        assertTrue(SettingsRepo.isBlockedOption("input-commands"))
+        assertFalse(SettingsRepo.isBlockedOption("hwdec"))
+        val opts = SettingsRepo.parseOptions("--hwdec=auto\n--config-dir=/tmp\nsub-file=x.srt\n")
+        assertEquals(listOf("hwdec" to "auto"), opts)
+    }
+
+    @Test fun resolveFileRejectsTraversal() {
+        assertEquals(null, MpvPath.resolveFile("content://x/document/primary:..%2F..%2Fsecret"))
+        assertEquals(null, MpvPath.resolveFile("content://x/document/1234:Movies/a.mp4"))
+        assertEquals(null, MpvPath.resolveFile("file:///etc/passwd"))
+    }
+
+    @Test fun logPathMasking() {
+        val masked = com.example.mpvlibrary.data.AppLog.maskPaths("open /storage/emulated/0/Movies/a.mp4 ok")
+        assertFalse(masked.contains("/storage/emulated/0"))
+        assertTrue(masked.contains("<path>"))
+    }
+
     @Test fun videoAlignEnumMappings() {
         assertEquals("-1", VideoAlign.TOP.value)
         assertEquals("0", VideoAlign.CENTER.value)

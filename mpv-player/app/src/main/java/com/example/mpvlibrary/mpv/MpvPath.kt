@@ -113,7 +113,7 @@ object MpvPath {
                 out.delete()
                 return null
             }
-            AppLog.i(TAG, "cached ${short(uri)} -> ${out.name} (${out.length()}B)")
+            AppLog.i(TAG, "cached subtitle ${out.length()}B")
             pruneSubs(dir)
             out
         } catch (e: Exception) {
@@ -138,11 +138,16 @@ object MpvPath {
 
     /**
      * Resolve a real filesystem File from a content: or file: URI.
-     * Returns candidate File even if exists() is currently blocked by permission checks.
+     * Returns null for non-primary volumes, ".." traversal, or absolute-path
+     * escapes: SAF 전용 삭제 전환 이후 남은 유일한 호출자는 MediaStore 매칭이었으며,
+     * 이 함수는 더 이상 호출되지 않는다(하위 호환용으로만 유지).
      */
     fun resolveFile(uriStr: String): File? {
         if (uriStr.startsWith("file://")) {
-            return runCatching { File(Uri.parse(uriStr).path ?: "") }.getOrNull()
+            val p = runCatching { File(Uri.parse(uriStr).path ?: "") }.getOrNull() ?: return null
+            val canon = runCatching { p.canonicalPath }.getOrNull() ?: return null
+            val ok = canon.startsWith("/storage/emulated/0/") || canon.startsWith("/sdcard/")
+            return if (ok) File(canon) else null
         }
         val decoded = runCatching { Uri.decode(uriStr) }.getOrNull() ?: return null
         val rel = when {
@@ -156,15 +161,13 @@ object MpvPath {
                     if (vol == "primary") sub else null
                 } else null
             }
-        }
-        if (rel != null) {
-            val f = File("/storage/emulated/0", rel)
-            if (f.exists()) return f
-            val fSdcard = File("/sdcard", rel)
-            if (fSdcard.exists()) return fSdcard
-            return f
-        }
-        return null
+        } ?: return null
+        if (rel.isEmpty() || rel.startsWith("/") || rel.split("/").any { it == ".." }) return null
+        val base = File("/storage/emulated/0")
+        val canon = runCatching { File(base, rel).canonicalPath }.getOrNull() ?: return null
+        val baseCanon = runCatching { base.canonicalPath }.getOrNull() ?: "/storage/emulated/0"
+        if (canon != baseCanon && !canon.startsWith("$baseCanon/")) return null
+        return File(canon)
     }
 
     /**
