@@ -827,6 +827,48 @@ fun FolderScreen(
     val inSelectionMode = selectedUris.isNotEmpty()
     var showDeleteDialog by remember { mutableStateOf(false) }
     var deleteTargetUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    // 권한 회수 시: 삭제 보류 목록 + 재요청 런처. 권한을 다시 얻으면 삭제 절차를 이어간다.
+    var pendingDeleteUris by remember { mutableStateOf<List<String>>(emptyList()) }
+    var showPermissionLostDialog by remember { mutableStateOf(false) }
+    var treeWriteLost by remember { mutableStateOf(false) }
+    val treePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        AppLog.i("library", "reauth picker result: ${uri != null}")
+        if (uri != null) {
+            LibraryScanner.takePermission(context, uri)
+            AppLog.i(
+                "library",
+                "reauth grant persisted=" +
+                    LibraryScanner.hasPersistedPermission(context, uri, write = true),
+            )
+            scope.launch(Dispatchers.IO) {
+                // 재선택한 트리로 폴더 행을 갱신: 권한-폴더 어긋남 방지 + 스캔으로 목록 복구.
+                // 같은 폴더를 다시 고르면 treeUri가 동일해 id가 유지되고,
+                // 다른 폴더를 고르면 이 폴더 행의 트리만 교체한다(신규 등록 아님).
+                val cur = db.folders().byId(folderId)
+                if (cur != null && cur.treeUri != uri.toString()) {
+                    db.folders().updateTree(
+                        folderId, uri.toString(),
+                        LibraryScanner.displayName(context, uri),
+                    )
+                    folder = db.folders().byId(folderId)
+                }
+                scanner.scanAll()
+                val retry = pendingDeleteUris
+                pendingDeleteUris = emptyList()
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    treeWriteLost = false
+                    if (retry.isNotEmpty()) {
+                        deleteTargetUris = retry
+                        showDeleteDialog = true
+                    }
+                }
+            }
+        } else {
+            pendingDeleteUris = emptyList()
+        }
+    }
 
     BackHandler(enabled = inSelectionMode) {
         selectedUris = emptySet()
@@ -869,8 +911,42 @@ fun FolderScreen(
         selectedUris = if (selectedUris.contains(uri)) selectedUris - uri else selectedUris + uri
     }
 
+    // 폴더 트리 쓰기 권한 회수 감지: 삭제 진입 전에도 배너로 재요청을 안내한다.
+    LaunchedEffect(folder) {
+        val t = folder?.let { runCatching { Uri.parse(it.treeUri) }.getOrNull() }
+        treeWriteLost = if (t != null) {
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                !LibraryScanner.hasPersistedPermission(context, t, write = true)
+            }
+        } else false
+    }
+
     val folderContent: @Composable (Modifier) -> Unit = { modifier ->
         Column(modifier.fillMaxSize()) {
+            if (treeWriteLost) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "폴더 접근 권한이 회수되어 삭제·갱신이 안 될 수 있습니다.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = {
+                            pendingDeleteUris = emptyList()
+                            showPermissionLostDialog = true
+                        }) { Text("권한 다시 허용") }
+                    }
+                }
+            }
             // If in selection mode and showTopBar is false (narrow screen), show compact action banner
             if (inSelectionMode && !showTopBar) {
                 Surface(
@@ -1178,6 +1254,15 @@ fun FolderScreen(
                         val targets = deleteTargetUris
                         showDeleteDialog = false
                         deleteTargetUris = emptyList()
+                        // 삭제 전 폴더 트리 쓰기 권한 확인: 시스템 설정에서 회수된 경우
+                        // 아래 DocumentsContract 호출이 SecurityException으로 실패하므로,
+                        // 먼저 확인하고 재요청 다이얼로그로 안내한다.
+                        val treeUri = folder?.let { runCatching { Uri.parse(it.treeUri) }.getOrNull() }
+                        if (treeUri != null && !LibraryScanner.hasPersistedPermission(context, treeUri, write = true)) {
+                            pendingDeleteUris = targets
+                            showPermissionLostDialog = true
+                            return@Button
+                        }
                         scope.launch(Dispatchers.IO) {
                             var deletedCount = 0
                             var failedCount = 0
@@ -1246,12 +1331,25 @@ fun FolderScreen(
                             }
 
                             if (failedCount > 0) {
-                                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        "${deletedCount}개 삭제 완료 (${failedCount}개 실패: 폴더 접근 권한을 확인해 주세요)",
-                                        android.widget.Toast.LENGTH_LONG
-                                    ).show()
+                                // 삭제 도중 권한 회수를 확인: 트리 권한이 없으면 보류 목록을 들고 재요청으로 유도.
+                                val lost = folder?.let { f ->
+                                    runCatching { Uri.parse(f.treeUri) }.getOrNull()?.let { t ->
+                                        !LibraryScanner.hasPersistedPermission(context, t, write = true)
+                                    } ?: false
+                                } ?: false
+                                if (lost) {
+                                    pendingDeleteUris = failedUris.toList()
+                                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                        showPermissionLostDialog = true
+                                    }
+                                } else {
+                                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "${deletedCount}개 삭제 완료 (${failedCount}개 실패: 폴더 접근 권한을 확인해 주세요)",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
                                 }
                             } else {
                                 kotlinx.coroutines.withContext(Dispatchers.Main) {
@@ -1271,6 +1369,35 @@ fun FolderScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteDialog = false; deleteTargetUris = emptyList() }) {
+                    Text("취소")
+                }
+            },
+        )
+    }
+
+    // 폴더 접근 권한이 회수된 경우: 다시 허용받고 삭제 절차를 이어간다.
+    if (showPermissionLostDialog) {
+        AlertDialog(
+            onDismissRequest = { showPermissionLostDialog = false; pendingDeleteUris = emptyList() },
+            icon = { Icon(Icons.Default.FolderShared, null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("폴더 접근 권한 필요") },
+            text = {
+                Text(
+                    "등록된 폴더의 접근 권한이 회수되어 파일을 삭제할 수 없습니다.\n\n" +
+                        "[폴더 다시 선택]을 눌러 같은 폴더를 선택하면 권한을 다시 허용하고 삭제 절차를 이어갑니다. " +
+                        "실제 파일은 건드리지 않고 권한만 다시 얻습니다."
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showPermissionLostDialog = false
+                    treePermissionLauncher.launch(null)
+                }) {
+                    Text("폴더 다시 선택")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionLostDialog = false; pendingDeleteUris = emptyList() }) {
                     Text("취소")
                 }
             },

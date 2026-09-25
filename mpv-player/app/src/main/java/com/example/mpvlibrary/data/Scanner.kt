@@ -22,6 +22,21 @@ class LibraryScanner(private val context: Context) {
         fun isVideo(name: String): Boolean =
             name.substringAfterLast('.', "").lowercase() in VIDEO_EXTENSIONS
 
+        /** 영속 권한이 이미 있는지 확인 (회수 여부 판단용). */
+        fun hasPersistedPermission(context: Context, treeUri: Uri, write: Boolean = false): Boolean {
+            val held = runCatching {
+                context.contentResolver.persistedUriPermissions.any {
+                    it.uri == treeUri && it.isReadPermission && (!write || it.isWritePermission)
+                }
+            }.getOrDefault(false)
+            // 회수 감지 근거를 남긴다: persisted 목록 자체가 비면 시스템 회수/초기화.
+            if (!held) {
+                val n = runCatching { context.contentResolver.persistedUriPermissions.size }.getOrDefault(-1)
+                AppLog.w("library", "persisted permission missing (write=$write, grants=$n)")
+            }
+            return held
+        }
+
         fun takePermission(context: Context, treeUri: Uri) {
             val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             runCatching {

@@ -22,6 +22,9 @@ interface FolderDao {
 
     @Query("SELECT * FROM folders WHERE id = :id")
     suspend fun byId(id: Long): FolderEntity?
+
+    @Query("UPDATE folders SET treeUri = :treeUri, displayName = :displayName WHERE id = :id")
+    suspend fun updateTree(id: Long, treeUri: String, displayName: String)
 }
 
 @Dao
