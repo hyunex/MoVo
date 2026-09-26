@@ -831,10 +831,15 @@ fun FolderScreen(
     var pendingDeleteUris by remember { mutableStateOf<List<String>>(emptyList()) }
     var showPermissionLostDialog by remember { mutableStateOf(false) }
     var treeWriteLost by remember { mutableStateOf(false) }
+    // 권한 재요청 대상 폴더: 피커를 문제 폴더에서 바로 열기 위한 initialUri + 표시명.
+    var reauthTarget by remember { mutableStateOf<FolderEntity?>(null) }
     val treePermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         AppLog.i("library", "reauth picker result: ${uri != null}")
+        if (uri == null) {
+            reauthTarget = null
+        }
         if (uri != null) {
             LibraryScanner.takePermission(context, uri)
             AppLog.i(
@@ -859,6 +864,7 @@ fun FolderScreen(
                 pendingDeleteUris = emptyList()
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                     treeWriteLost = false
+                    reauthTarget = null
                     if (retry.isNotEmpty()) {
                         deleteTargetUris = retry
                         showDeleteDialog = true
@@ -942,6 +948,7 @@ fun FolderScreen(
                         )
                         TextButton(onClick = {
                             pendingDeleteUris = emptyList()
+                            reauthTarget = folder
                             showPermissionLostDialog = true
                         }) { Text("권한 다시 허용") }
                     }
@@ -1260,6 +1267,7 @@ fun FolderScreen(
                         val treeUri = folder?.let { runCatching { Uri.parse(it.treeUri) }.getOrNull() }
                         if (treeUri != null && !LibraryScanner.hasPersistedPermission(context, treeUri, write = true)) {
                             pendingDeleteUris = targets
+                            reauthTarget = folder
                             showPermissionLostDialog = true
                             return@Button
                         }
@@ -1338,8 +1346,10 @@ fun FolderScreen(
                                     } ?: false
                                 } ?: false
                                 if (lost) {
+                                    val lostFolder = folder
                                     pendingDeleteUris = failedUris.toList()
                                     kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                        reauthTarget = lostFolder
                                         showPermissionLostDialog = true
                                     }
                                 } else {
@@ -1375,29 +1385,35 @@ fun FolderScreen(
         )
     }
 
-    // 폴더 접근 권한이 회수된 경우: 다시 허용받고 삭제 절차를 이어간다.
+    // 폴더 접근 권한이 회수된 경우: 문제 폴더를 바로 보여주고 권한을 다시 얻는다.
     if (showPermissionLostDialog) {
+        val target = reauthTarget
+        val targetName = target?.displayName ?: folder?.displayName
         AlertDialog(
-            onDismissRequest = { showPermissionLostDialog = false; pendingDeleteUris = emptyList() },
+            onDismissRequest = { showPermissionLostDialog = false; pendingDeleteUris = emptyList(); reauthTarget = null },
             icon = { Icon(Icons.Default.FolderShared, null, tint = MaterialTheme.colorScheme.primary) },
             title = { Text("폴더 접근 권한 필요") },
             text = {
                 Text(
-                    "등록된 폴더의 접근 권한이 회수되어 파일을 삭제할 수 없습니다.\n\n" +
-                        "[폴더 다시 선택]을 눌러 같은 폴더를 선택하면 권한을 다시 허용하고 삭제 절차를 이어갑니다. " +
-                        "실제 파일은 건드리지 않고 권한만 다시 얻습니다."
+                    (if (targetName != null) "\"${targetName}\" 폴더의 접근 권한이 회수되어 파일을 삭제할 수 없습니다.\n\n"
+                    else "등록된 폴더의 접근 권한이 회수되어 파일을 삭제할 수 없습니다.\n\n") +
+                        "[폴더 다시 선택]을 누르면 문제가 있는 폴더를 바로 보여주니, " +
+                        "해당 폴더에서 [이 폴더 사용]을 눌러 권한을 다시 허용해 주세요. " +
+                        "실제 파일은 건드리지 않고 권한만 다시 얻은 뒤 삭제 절차를 이어갑니다."
                 )
             },
             confirmButton = {
                 Button(onClick = {
                     showPermissionLostDialog = false
-                    treePermissionLauncher.launch(null)
+                    // 문제 폴더를 initialUri로 넘겨 피커가 그 폴더를 바로 표시하게 한다.
+                    val initial = target?.let { runCatching { Uri.parse(it.treeUri) }.getOrNull() }
+                    treePermissionLauncher.launch(initial)
                 }) {
                     Text("폴더 다시 선택")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showPermissionLostDialog = false; pendingDeleteUris = emptyList() }) {
+                TextButton(onClick = { showPermissionLostDialog = false; pendingDeleteUris = emptyList(); reauthTarget = null }) {
                     Text("취소")
                 }
             },
