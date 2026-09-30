@@ -73,10 +73,21 @@ class LibraryScanner(private val context: Context) {
 
     /** Re-scan one registered folder; adds new videos, refreshes metadata, drops deleted ones. */
     suspend fun scan(folder: FolderEntity) = withContext(Dispatchers.IO) {
-        val root = DocumentFile.fromTreeUri(context, Uri.parse(folder.treeUri)) ?: return@withContext
+        val uri = runCatching { Uri.parse(folder.treeUri) }.getOrNull() ?: return@withContext
+        if (!hasPersistedPermission(context, uri, write = false)) {
+            AppLog.w("library", "scan skipped: read permission not held for folder ${folder.id}")
+            return@withContext
+        }
+        val root = DocumentFile.fromTreeUri(context, uri) ?: return@withContext
+        val rootFiles = runCatching { root.listFiles() }.getOrNull()
+        if (rootFiles == null) {
+            AppLog.w("library", "scan skipped: root directory cannot be listed for folder ${folder.id}")
+            return@withContext
+        }
         val found = ArrayList<String>()
         walk(root, "", found, folder.id, 0)
-        // Files deleted or moved out of the tree must disappear from the library.
+        // Files deleted or moved out of the tree must disappear from the library,
+        // but only when the tree was legitimately accessible.
         db.videos().deleteStale(folder.id, found.ifEmpty { listOf("__none__") })
     }
 

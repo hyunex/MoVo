@@ -1,9 +1,11 @@
 package com.example.mpvlibrary.ui
 
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -54,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import com.example.mpvlibrary.data.*
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -329,7 +332,7 @@ fun LibraryScreen(
     var recent by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
     var threshold by remember { mutableStateOf(0.9) }
     var thumbScale by remember { mutableStateOf("medium") }
-
+    var continuePlaylistMode by remember { mutableStateOf(SettingsRepo.DEFAULT_CONTINUE_PLAYLIST) }
     var selection by remember { mutableStateOf<HomeSelection>(HomeSelection.ContinueWatching) }
     var folderPath by remember { mutableStateOf("") }
     var unregisterTarget by remember { mutableStateOf<FolderEntity?>(null) }
@@ -352,6 +355,7 @@ fun LibraryScreen(
         launch(Dispatchers.IO) { db.folders().observeAll().collect { folders = it } }
         launch(Dispatchers.IO) { db.videos().observeRecent(10).collect { recent = it } }
         launch(Dispatchers.IO) { s.thumbScale.collect { thumbScale = it } }
+        launch(Dispatchers.IO) { s.continuePlaylistMode.collect { continuePlaylistMode = it } }
     }
 
     // Keep selection valid: default to 이어보기, drop removed folders, reset stale sub-paths.
@@ -391,18 +395,33 @@ fun LibraryScreen(
         recent.filter { it.positionSec > 0 && !it.isWatched(threshold) }.take(6)
     }
 
-    val playVideoWithFolderContext: (VideoEntity) -> Unit = { v ->
+    val playContinueVideo: (VideoEntity) -> Unit = { v ->
         scope.launch(Dispatchers.IO) {
-            val folderVideos = db.videos().forFolder(v.folderId).sortedBy { naturalKey(it.name) }
-            val uris = folderVideos.map { it.uri }.ifEmpty { listOf(v.uri) }
-            val idx = uris.indexOf(v.uri).coerceAtLeast(0)
+            val mode = ContinuePlaylistMode.fromValue(continuePlaylistMode)
+            val folderVideos = if (mode == ContinuePlaylistMode.ORIGINAL_FOLDER) {
+                db.videos().forFolder(v.folderId)
+            } else {
+                emptyList()
+            }
+            val (uris, idx) = buildContinuePlaylist(
+                mode = mode,
+                target = v,
+                continueWatchingList = continueWatching,
+                folderVideos = folderVideos,
+            )
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 PlayerActivity.start(context, uris, idx)
             }
         }
     }
 
+    val continueDeleteState = remember(context, scope, db, scanner) {
+        SafeDeleteState(context, scope, db, scanner)
+    }
+
     BoxWithConstraints(Modifier.fillMaxSize()) {
+        SafeDeleteDialogs(continueDeleteState)
+
         val isWide = maxWidth >= 600.dp
 
         if (isWide) {
@@ -508,8 +527,9 @@ fun LibraryScreen(
                                 ContinueWatchingPane(
                                     videos = continueWatching,
                                     threshold = threshold,
-                                    onPlay = playVideoWithFolderContext,
+                                    onPlay = playContinueVideo,
                                     onRefresh = { scanner.scanAll() },
+                                    deleteState = continueDeleteState,
                                     modifier = Modifier.padding(pad),
                                     thumbSize = when (thumbScale) {
                                         "small" -> 88.dp
@@ -642,8 +662,9 @@ fun LibraryScreen(
                             is HomeSelection.ContinueWatching -> ContinueWatchingPane(
                                 videos = continueWatching,
                                 threshold = threshold,
-                                onPlay = playVideoWithFolderContext,
+                                onPlay = playContinueVideo,
                                 onRefresh = { scanner.scanAll() },
+                                deleteState = continueDeleteState,
                                 thumbSize = when (thumbScale) {
                                     "small" -> 88.dp
                                     "large" -> 148.dp
@@ -753,15 +774,300 @@ fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
     }
 }
 
+class SafeDeleteState(
+    val context: Context,
+    val scope: CoroutineScope,
+    val db: AppDb,
+    val scanner: LibraryScanner,
+    val onDeleteSuccess: (List<String>) -> Unit = {},
+) {
+    var showDeleteDialog by mutableStateOf(false)
+    var deleteTargetUris by mutableStateOf<List<String>>(emptyList())
+    var pendingDeleteUris by mutableStateOf<List<String>>(emptyList())
+    var showPermissionLostDialog by mutableStateOf(false)
+    var reauthTarget by mutableStateOf<FolderEntity?>(null)
+
+    fun requestDelete(uris: List<String>) {
+        if (uris.isEmpty()) return
+        deleteTargetUris = uris
+        showDeleteDialog = true
+    }
+
+    fun executeConfirmedDelete() {
+        val targets = deleteTargetUris
+        showDeleteDialog = false
+        deleteTargetUris = emptyList()
+
+        scope.launch(Dispatchers.IO) {
+            val entities = targets.mapNotNull { db.videos().byUri(it) }
+            val folderIds = entities.map { it.folderId }.distinct()
+            val folders = folderIds.mapNotNull { db.folders().byId(it) }
+
+            // Check if any folder lost write permission
+            for (f in folders) {
+                val treeUri = runCatching { Uri.parse(f.treeUri) }.getOrNull()
+                if (treeUri == null || !LibraryScanner.hasPersistedPermission(context, treeUri, write = true)) {
+                    pendingDeleteUris = targets
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        reauthTarget = f
+                        showPermissionLostDialog = true
+                    }
+                    return@launch
+                }
+            }
+
+            var deletedCount = 0
+            var failedCount = 0
+            val failedUris = mutableListOf<String>()
+            val securityDeniedUris = mutableSetOf<String>()
+
+            for (u in targets) {
+                val parsed = Uri.parse(u)
+                val entity = db.videos().byUri(u)
+                val f = entity?.let { db.folders().byId(it.folderId) }
+                if (f != null) {
+                    runCatching { LibraryScanner.takePermission(context, Uri.parse(f.treeUri)) }
+                }
+                var success = false
+                if (!success) {
+                    val contractRes = runCatching {
+                        DocumentsContract.deleteDocument(context.contentResolver, parsed)
+                    }
+                    if (contractRes.isSuccess && contractRes.getOrNull() == true) {
+                        success = true
+                    } else if (contractRes.exceptionOrNull() is SecurityException) {
+                        securityDeniedUris.add(u)
+                    }
+                }
+                if (!success) {
+                    val docRes = runCatching {
+                        DocumentFile.fromSingleUri(context, parsed)?.delete() == true
+                    }
+                    if (docRes.isSuccess && docRes.getOrNull() == true) {
+                        success = true
+                    } else if (docRes.exceptionOrNull() is SecurityException) {
+                        securityDeniedUris.add(u)
+                    }
+                }
+                if (!success) {
+                    val treeRes = runCatching {
+                        if (f != null) {
+                            val root = DocumentFile.fromTreeUri(context, Uri.parse(f.treeUri))
+                            if (entity != null && root != null) {
+                                var dir: DocumentFile? = root
+                                if (entity.dirPath.isNotEmpty()) {
+                                    for (seg in entity.dirPath.split('/')) {
+                                        if (seg.isEmpty() || seg == "." || seg == "..") continue
+                                        dir = dir?.findFile(seg)
+                                        if (dir == null) break
+                                    }
+                                }
+                                dir?.findFile(entity.name)?.delete() == true
+                            } else false
+                        } else false
+                    }
+                    if (treeRes.isSuccess && treeRes.getOrNull() == true) {
+                        success = true
+                    } else if (treeRes.exceptionOrNull() is SecurityException) {
+                        securityDeniedUris.add(u)
+                    }
+                }
+                if (success) {
+                    deletedCount++
+                    AppLog.i("library", "file deleted via SAF: $u")
+                } else {
+                    failedCount++
+                    failedUris.add(u)
+                    AppLog.w("library", "file SAF delete failed: $u")
+                }
+            }
+
+            val successfullyDeleted = targets - failedUris.toSet()
+            if (successfullyDeleted.isNotEmpty()) {
+                db.videos().deleteByUris(successfullyDeleted)
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    onDeleteSuccess(successfullyDeleted)
+                }
+            }
+
+            if (failedCount > 0) {
+                val lostFolder = failedUris.firstNotNullOfOrNull { u ->
+                    val v = db.videos().byUri(u)
+                    v?.let { db.folders().byId(it.folderId) }?.takeIf { f ->
+                        val t = runCatching { Uri.parse(f.treeUri) }.getOrNull()
+                        (u in securityDeniedUris) || t == null || !LibraryScanner.hasPersistedPermission(context, t, write = true)
+                    }
+                }
+                if (lostFolder != null) {
+                    pendingDeleteUris = failedUris
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        reauthTarget = lostFolder
+                        showPermissionLostDialog = true
+                    }
+                } else {
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        android.widget.Toast.makeText(
+                            context,
+                            "${deletedCount}개 삭제 완료 (${failedCount}개 실패: 폴더 접근 권한을 확인해 주세요)",
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            } else {
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        context,
+                        "${deletedCount}개의 동영상이 삭제되었습니다.",
+                        android.widget.Toast.LENGTH_SHORT,
+                    ).show()
+                }
+            }
+        }
+    }
+
+    fun handlePickerResult(uri: Uri?) {
+        AppLog.i("library", "reauth picker result: ${uri != null}")
+        if (uri == null) {
+            pendingDeleteUris = emptyList()
+            reauthTarget = null
+            return
+        }
+        val target = reauthTarget ?: return
+
+        val targetUri = runCatching { Uri.parse(target.treeUri) }.getOrNull()
+        val targetDocId = targetUri?.let { runCatching { DocumentsContract.getTreeDocumentId(it) }.getOrNull() }
+        val pickedDocId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
+
+        val sameAuthority = targetUri != null && uri.authority == targetUri.authority
+        val isMatch = (uri.toString() == target.treeUri) ||
+                (sameAuthority && targetDocId != null && pickedDocId != null && targetDocId == pickedDocId)
+
+        if (!isMatch) {
+            AppLog.w("library", "Picker returned different folder: $uri vs target ${target.treeUri}")
+            android.widget.Toast.makeText(
+                context,
+                "선택한 폴더가 기존 등록된 폴더(\"${target.displayName}\")와 일치하지 않습니다. 올바른 폴더를 다시 선택해 주세요.",
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+            showPermissionLostDialog = true
+            return
+        }
+        LibraryScanner.takePermission(context, uri)
+        AppLog.i(
+            "library",
+            "reauth grant persisted=" +
+                LibraryScanner.hasPersistedPermission(context, uri, write = true),
+        )
+        scope.launch(Dispatchers.IO) {
+            scanner.scan(target)
+            val retry = pendingDeleteUris
+            pendingDeleteUris = emptyList()
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                reauthTarget = null
+                if (retry.isNotEmpty()) {
+                    deleteTargetUris = retry
+                    showDeleteDialog = true
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SafeDeleteDialogs(state: SafeDeleteState) {
+    val treePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        state.handlePickerResult(uri)
+    }
+
+    if (state.showDeleteDialog && state.deleteTargetUris.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = {
+                state.showDeleteDialog = false
+                state.deleteTargetUris = emptyList()
+            },
+            title = { Text("동영상 삭제") },
+            text = {
+                Column {
+                    Text(
+                        "${state.deleteTargetUris.size}개의 동영상을 라이브러리 및 저장공간에서 완전히 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { state.executeConfirmedDelete() },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                ) {
+                    Text("삭제")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    state.showDeleteDialog = false
+                    state.deleteTargetUris = emptyList()
+                }) {
+                    Text("취소")
+                }
+            },
+        )
+    }
+
+    if (state.showPermissionLostDialog) {
+        val target = state.reauthTarget
+        val targetName = target?.displayName
+        AlertDialog(
+            onDismissRequest = {
+                state.showPermissionLostDialog = false
+                state.reauthTarget = null
+            },
+            icon = { Icon(Icons.Default.FolderShared, null, tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("폴더 접근 권한 필요") },
+            text = {
+                Text(
+                    (if (targetName != null) "\"${targetName}\" 폴더의 접근 권한이 회수되어 파일을 삭제할 수 없습니다.\n\n"
+                    else "등록된 폴더의 접근 권한이 회수되어 파일을 삭제할 수 없습니다.\n\n") +
+                        "[폴더 다시 선택]을 누르면 문제가 있는 폴더를 바로 보여주니, " +
+                        "해당 폴더에서 [이 폴더 사용]을 눌러 권한을 다시 허용해 주세요. " +
+                        "실제 파일은 건드리지 않고 권한만 다시 얻은 뒤 삭제 절차를 이어갑니다.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    state.showPermissionLostDialog = false
+                    val initial = target?.let { runCatching { Uri.parse(it.treeUri) }.getOrNull() }
+                    treePermissionLauncher.launch(initial)
+                }) {
+                    Text("폴더 다시 선택")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    state.showPermissionLostDialog = false
+                    state.reauthTarget = null
+                }) {
+                    Text("취소")
+                }
+            },
+        )
+    }
+}
+
 @Composable
 fun ContinueWatchingPane(
     videos: List<VideoEntity>,
     threshold: Double,
     onPlay: (VideoEntity) -> Unit,
     onRefresh: suspend () -> Unit,
+    deleteState: SafeDeleteState,
     modifier: Modifier = Modifier,
     thumbSize: Dp = 116.dp,
 ) {
+    val context = LocalContext.current
+    val db = remember { AppDb.get(context) }
+    val scope = rememberCoroutineScope()
+
     PullRefreshWrapper(
         modifier = modifier.fillMaxSize(),
         onRefresh = onRefresh,
@@ -778,6 +1084,7 @@ fun ContinueWatchingPane(
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
                 items(videos, key = { "c" + it.uri }) { v ->
+                    val watched = v.isWatched(threshold)
                     VideoRow(
                         v = v,
                         threshold = threshold,
@@ -786,9 +1093,19 @@ fun ContinueWatchingPane(
                         thumbWidth = thumbSize,
                         onClick = { onPlay(v) },
                         onLongClick = { onPlay(v) },
-                        onActionWatched = {},
-                        onActionReset = {},
-                        onActionDelete = {},
+                        onActionWatched = {
+                            scope.launch(Dispatchers.IO) {
+                                db.videos().setOverride(v.uri, if (watched) -1 else 1)
+                            }
+                        },
+                        onActionReset = {
+                            scope.launch(Dispatchers.IO) {
+                                db.videos().resetProgressBatch(listOf(v.uri))
+                            }
+                        },
+                        onActionDelete = {
+                            deleteState.requestDelete(listOf(v.uri))
+                        },
                     )
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                 }
@@ -825,55 +1142,17 @@ fun FolderScreen(
     // Multi-selection state for library file management
     var selectedUris by remember { mutableStateOf(setOf<String>()) }
     val inSelectionMode = selectedUris.isNotEmpty()
-    var showDeleteDialog by remember { mutableStateOf(false) }
-    var deleteTargetUris by remember { mutableStateOf<List<String>>(emptyList()) }
-    // 권한 회수 시: 삭제 보류 목록 + 재요청 런처. 권한을 다시 얻으면 삭제 절차를 이어간다.
-    var pendingDeleteUris by remember { mutableStateOf<List<String>>(emptyList()) }
-    var showPermissionLostDialog by remember { mutableStateOf(false) }
     var treeWriteLost by remember { mutableStateOf(false) }
-    // 권한 재요청 대상 폴더: 피커를 문제 폴더에서 바로 열기 위한 initialUri + 표시명.
-    var reauthTarget by remember { mutableStateOf<FolderEntity?>(null) }
-    val treePermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree(),
-    ) { uri ->
-        AppLog.i("library", "reauth picker result: ${uri != null}")
-        if (uri == null) {
-            reauthTarget = null
-        }
-        if (uri != null) {
-            LibraryScanner.takePermission(context, uri)
-            AppLog.i(
-                "library",
-                "reauth grant persisted=" +
-                    LibraryScanner.hasPersistedPermission(context, uri, write = true),
-            )
-            scope.launch(Dispatchers.IO) {
-                // 재선택한 트리로 폴더 행을 갱신: 권한-폴더 어긋남 방지 + 스캔으로 목록 복구.
-                // 같은 폴더를 다시 고르면 treeUri가 동일해 id가 유지되고,
-                // 다른 폴더를 고르면 이 폴더 행의 트리만 교체한다(신규 등록 아님).
-                val cur = db.folders().byId(folderId)
-                if (cur != null && cur.treeUri != uri.toString()) {
-                    db.folders().updateTree(
-                        folderId, uri.toString(),
-                        LibraryScanner.displayName(context, uri),
-                    )
-                    folder = db.folders().byId(folderId)
-                }
-                scanner.scanAll()
-                val retry = pendingDeleteUris
-                pendingDeleteUris = emptyList()
-                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    treeWriteLost = false
-                    reauthTarget = null
-                    if (retry.isNotEmpty()) {
-                        deleteTargetUris = retry
-                        showDeleteDialog = true
-                    }
-                }
-            }
-        } else {
-            pendingDeleteUris = emptyList()
-        }
+    val deleteState = remember(context, scope, db, scanner) {
+        SafeDeleteState(
+            context = context,
+            scope = scope,
+            db = db,
+            scanner = scanner,
+            onDeleteSuccess = { deleted ->
+                selectedUris = selectedUris - deleted.toSet()
+            },
+        )
     }
 
     BackHandler(enabled = inSelectionMode) {
@@ -947,9 +1226,9 @@ fun FolderScreen(
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(onClick = {
-                            pendingDeleteUris = emptyList()
-                            reauthTarget = folder
-                            showPermissionLostDialog = true
+                            deleteState.pendingDeleteUris = emptyList()
+                            deleteState.reauthTarget = folder
+                            deleteState.showPermissionLostDialog = true
                         }) { Text("권한 다시 허용") }
                     }
                 }
@@ -988,8 +1267,7 @@ fun FolderScreen(
                             Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
                         }
                         IconButton(onClick = {
-                            deleteTargetUris = selectedUris.toList()
-                            showDeleteDialog = true
+                            deleteState.requestDelete(selectedUris.toList())
                         }) {
                             Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
                         }
@@ -1082,8 +1360,7 @@ fun FolderScreen(
                                     scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
                                 },
                                 onActionDelete = {
-                                    deleteTargetUris = listOf(v.uri)
-                                    showDeleteDialog = true
+                                    deleteState.requestDelete(listOf(v.uri))
                                 },
                             )
                             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
@@ -1126,8 +1403,7 @@ fun FolderScreen(
                                 Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
                             }
                             IconButton(onClick = {
-                                deleteTargetUris = selectedUris.toList()
-                                showDeleteDialog = true
+                                deleteState.requestDelete(selectedUris.toList())
                             }) {
                                 Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
                             }
@@ -1175,8 +1451,7 @@ fun FolderScreen(
                                         text = { Text("선택 삭제", color = MaterialTheme.colorScheme.error) },
                                         leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
                                         onClick = {
-                                            deleteTargetUris = selectedUris.toList()
-                                            showDeleteDialog = true
+                                            deleteState.requestDelete(selectedUris.toList())
                                             showBatchMenu = false
                                         },
                                     )
@@ -1243,186 +1518,11 @@ fun FolderScreen(
         folderContent(Modifier)
     }
 
-    // Delete confirmation dialog
-    if (showDeleteDialog && deleteTargetUris.isNotEmpty()) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false; deleteTargetUris = emptyList() },
-            title = { Text("동영상 삭제") },
-            text = {
-                Column {
-                    Text(
-                        "${deleteTargetUris.size}개의 동영상을 라이브러리 및 저장공간에서 완전히 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        val targets = deleteTargetUris
-                        showDeleteDialog = false
-                        deleteTargetUris = emptyList()
-                        // 삭제 전 폴더 트리 쓰기 권한 확인: 시스템 설정에서 회수된 경우
-                        // 아래 DocumentsContract 호출이 SecurityException으로 실패하므로,
-                        // 먼저 확인하고 재요청 다이얼로그로 안내한다.
-                        val treeUri = folder?.let { runCatching { Uri.parse(it.treeUri) }.getOrNull() }
-                        if (treeUri != null && !LibraryScanner.hasPersistedPermission(context, treeUri, write = true)) {
-                            pendingDeleteUris = targets
-                            reauthTarget = folder
-                            showPermissionLostDialog = true
-                            return@Button
-                        }
-                        scope.launch(Dispatchers.IO) {
-                            var deletedCount = 0
-                            var failedCount = 0
-                            val failedUris = mutableListOf<String>()
-
-                            // SAF 전용 삭제: 직접 파일 경로 삭제(File.delete/MediaStore)는
-                            // MANAGE_EXTERNAL_STORAGE 없이는 타 앱 영역에서 오동작하므로 시도하지 않는다.
-                            // 순서: DocumentsContract -> 단일 DocumentFile -> 등록 트리에서 탐색 삭제.
-                            targets.forEach { u ->
-                                val parsed = Uri.parse(u)
-                                folder?.let { f ->
-                                    LibraryScanner.takePermission(context, Uri.parse(f.treeUri))
-                                }
-                                var success = false
-                                if (!success) {
-                                    val contractRes = runCatching {
-                                        android.provider.DocumentsContract.deleteDocument(context.contentResolver, parsed)
-                                    }
-                                    if (contractRes.isSuccess && contractRes.getOrNull() == true) {
-                                        success = true
-                                    }
-                                }
-                                if (!success) {
-                                    val docRes = runCatching {
-                                        DocumentFile.fromSingleUri(context, parsed)?.delete() == true
-                                    }
-                                    if (docRes.isSuccess && docRes.getOrNull() == true) {
-                                        success = true
-                                    }
-                                }
-                                if (!success) {
-                                    val treeRes = runCatching {
-                                        folder?.let { f ->
-                                            val root = DocumentFile.fromTreeUri(context, Uri.parse(f.treeUri))
-                                            val entity = db.videos().byUri(u)
-                                            if (entity != null && root != null) {
-                                                var dir: DocumentFile? = root
-                                                if (entity.dirPath.isNotEmpty()) {
-                                                    for (seg in entity.dirPath.split('/')) {
-                                                        if (seg.isEmpty() || seg == "." || seg == "..") continue
-                                                        dir = dir?.findFile(seg) ?: break
-                                                    }
-                                                }
-                                                dir?.findFile(entity.name)?.delete() == true
-                                            } else false
-                                        } == true
-                                    }
-                                    if (treeRes.isSuccess && treeRes.getOrNull() == true) {
-                                        success = true
-                                    }
-                                }
-                                if (success) {
-                                    deletedCount++
-                                    AppLog.i("library", "file deleted via SAF")
-                                } else {
-                                    failedCount++
-                                    failedUris.add(u)
-                                    AppLog.w("library", "file SAF delete failed")
-                                }
-                            }
-
-                            val successfullyDeleted = targets - failedUris.toSet()
-                            if (successfullyDeleted.isNotEmpty()) {
-                                db.videos().deleteByUris(successfullyDeleted)
-                                selectedUris = selectedUris - successfullyDeleted.toSet()
-                            }
-
-                            if (failedCount > 0) {
-                                // 삭제 도중 권한 회수를 확인: 트리 권한이 없으면 보류 목록을 들고 재요청으로 유도.
-                                val lost = folder?.let { f ->
-                                    runCatching { Uri.parse(f.treeUri) }.getOrNull()?.let { t ->
-                                        !LibraryScanner.hasPersistedPermission(context, t, write = true)
-                                    } ?: false
-                                } ?: false
-                                if (lost) {
-                                    val lostFolder = folder
-                                    pendingDeleteUris = failedUris.toList()
-                                    kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                        reauthTarget = lostFolder
-                                        showPermissionLostDialog = true
-                                    }
-                                } else {
-                                    kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            "${deletedCount}개 삭제 완료 (${failedCount}개 실패: 폴더 접근 권한을 확인해 주세요)",
-                                            android.widget.Toast.LENGTH_LONG
-                                        ).show()
-                                    }
-                                }
-                            } else {
-                                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        "${deletedCount}개의 동영상이 삭제되었습니다.",
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                            }
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                ) {
-                    Text("삭제")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteDialog = false; deleteTargetUris = emptyList() }) {
-                    Text("취소")
-                }
-            },
-        )
-    }
-
-    // 폴더 접근 권한이 회수된 경우: 문제 폴더를 바로 보여주고 권한을 다시 얻는다.
-    if (showPermissionLostDialog) {
-        val target = reauthTarget
-        val targetName = target?.displayName ?: folder?.displayName
-        AlertDialog(
-            onDismissRequest = { showPermissionLostDialog = false; pendingDeleteUris = emptyList(); reauthTarget = null },
-            icon = { Icon(Icons.Default.FolderShared, null, tint = MaterialTheme.colorScheme.primary) },
-            title = { Text("폴더 접근 권한 필요") },
-            text = {
-                Text(
-                    (if (targetName != null) "\"${targetName}\" 폴더의 접근 권한이 회수되어 파일을 삭제할 수 없습니다.\n\n"
-                    else "등록된 폴더의 접근 권한이 회수되어 파일을 삭제할 수 없습니다.\n\n") +
-                        "[폴더 다시 선택]을 누르면 문제가 있는 폴더를 바로 보여주니, " +
-                        "해당 폴더에서 [이 폴더 사용]을 눌러 권한을 다시 허용해 주세요. " +
-                        "실제 파일은 건드리지 않고 권한만 다시 얻은 뒤 삭제 절차를 이어갑니다."
-                )
-            },
-            confirmButton = {
-                Button(onClick = {
-                    showPermissionLostDialog = false
-                    // 문제 폴더를 initialUri로 넘겨 피커가 그 폴더를 바로 표시하게 한다.
-                    val initial = target?.let { runCatching { Uri.parse(it.treeUri) }.getOrNull() }
-                    treePermissionLauncher.launch(initial)
-                }) {
-                    Text("폴더 다시 선택")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showPermissionLostDialog = false; pendingDeleteUris = emptyList(); reauthTarget = null }) {
-                    Text("취소")
-                }
-            },
-        )
-    }
+    SafeDeleteDialogs(deleteState)
 
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun VideoRow(
     v: VideoEntity,
@@ -1433,21 +1533,67 @@ fun VideoRow(
     onLongClick: () -> Unit,
     onActionWatched: () -> Unit,
     onActionReset: () -> Unit,
-    onActionDelete: () -> Unit,
+    onActionDelete: (() -> Unit)?,
     thumbWidth: Dp = 116.dp,
 ) {
     val watched = v.isWatched(threshold)
     val inProgress = v.isInProgress(threshold)
     var showMenu by remember { mutableStateOf(false) }
 
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    val canSwipeDelete = !inSelectionMode && onActionDelete != null
+
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) {
+                if (canSwipeDelete) {
+                    onActionDelete?.invoke()
+                }
+                false
+            } else {
+                false
+            }
+        },
+    )
+
+    LaunchedEffect(dismissState.currentValue) {
+        if (dismissState.currentValue != SwipeToDismissBoxValue.Settled) {
+            dismissState.reset()
+        }
+    }
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = false,
+        enableDismissFromEndToStart = canSwipeDelete,
+        backgroundContent = {
+            val direction = dismissState.dismissDirection
+            val isEndToStart = direction == SwipeToDismissBoxValue.EndToStart
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(if (isEndToStart) MaterialTheme.colorScheme.error else Color.Transparent)
+                    .padding(horizontal = 20.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                if (isEndToStart) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = "삭제",
+                        tint = MaterialTheme.colorScheme.onError,
+                    )
+                }
+            }
+        },
     ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
         // Thumbnail: green top-end badge = watched, blue top-start badge = long-press selected.
         Thumb(
             uri = v.uri,
@@ -1561,15 +1707,18 @@ fun VideoRow(
                     onClick = { onActionReset(); showMenu = false },
                     leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
                 )
-                HorizontalDivider()
-                DropdownMenuItem(
-                    text = { Text("삭제", color = MaterialTheme.colorScheme.error) },
-                    onClick = { onActionDelete(); showMenu = false },
-                    leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                )
+                if (onActionDelete != null) {
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("삭제", color = MaterialTheme.colorScheme.error) },
+                        onClick = { onActionDelete(); showMenu = false },
+                        leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    )
+                }
             }
         }
     }
+}
 }
 
 // ---------------------------------------------------------------- Settings
@@ -1593,13 +1742,19 @@ fun SettingsScreen(onBack: () -> Unit) {
     var rememberBright by remember { mutableStateOf(false) }
     var autoSub by remember { mutableStateOf(true) }
     var thumbScale by remember { mutableStateOf("medium") }
+    var speedStep by remember { mutableStateOf(SettingsRepo.DEFAULT_SPEED_STEP) }
+    var continuePlaylistMode by remember { mutableStateOf(SettingsRepo.DEFAULT_CONTINUE_PLAYLIST) }
 
     // UI state for inputs & modals
     var newSpeedInput by remember { mutableStateOf("") }
     var speedInputError by remember { mutableStateOf<String?>(null) }
     var showAlignDialog by remember { mutableStateOf(false) }
     var showMpvDialog by remember { mutableStateOf(false) }
-
+    var showBulkPresetsDialog by remember { mutableStateOf(false) }
+    var bulkPresetsInput by remember { mutableStateOf("") }
+    var bulkPresetsError by remember { mutableStateOf<String?>(null) }
+    var customStepInput by remember { mutableStateOf("") }
+    var customStepError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         defaultSpeed = settings.defaultSpeed.first()
         speedPresets = settings.speedPresets.first()
@@ -1612,17 +1767,19 @@ fun SettingsScreen(onBack: () -> Unit) {
         rememberBright = settings.rememberBrightness.first()
         autoSub = settings.autoSubtitle.first()
         thumbScale = settings.thumbScale.first()
+        speedStep = settings.speedStep.first()
+        continuePlaylistMode = settings.continuePlaylistMode.first()
         loaded = true
     }
     if (!loaded) return
 
     fun onAddSpeed() {
-        val parsed = newSpeedInput.trim().toDoubleOrNull()
-        if (parsed == null || parsed < 0.1 || parsed > 5.0) {
-            speedInputError = "0.1 ~ 5.0 사이의 숫자 입력 (예: 1.3)"
+        val res = SettingsRepo.validateAndParseSpeedPresets(newSpeedInput)
+        if (res.isFailure) {
+            speedInputError = res.exceptionOrNull()?.message ?: "0.1 ~ 5.0 사이의 숫자 입력 (예: 1.3)"
         } else {
-            val rounded = (parsed * 100.0).toInt() / 100.0
-            val updated = (speedPresets + rounded).distinct().sorted()
+            val newValues = res.getOrThrow()
+            val updated = (speedPresets + newValues).distinct().sorted()
             speedPresets = updated
             newSpeedInput = ""
             speedInputError = null
@@ -1740,7 +1897,25 @@ fun SettingsScreen(onBack: () -> Unit) {
                             Text(speedInputError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 4.dp, top = 2.dp))
                         }
 
-                        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    bulkPresetsInput = speedPresets.joinToString(", ") {
+                                        if (it % 1.0 == 0.0) it.toInt().toString() else "%.2f".format(Locale.US, it).trimEnd('0').trimEnd('.')
+                                    }
+                                    bulkPresetsError = null
+                                    showBulkPresetsDialog = true
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                            ) {
+                                Icon(Icons.Default.Edit, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("일괄 편집", fontSize = 12.sp)
+                            }
                             TextButton(onClick = {
                                 speedPresets = SettingsRepo.DEFAULT_SPEED_PRESETS
                                 defaultSpeed = 1.0
@@ -1750,6 +1925,184 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 }
                             }) {
                                 Text("기본 프리셋 복원", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. 배속 조절 최소 단위 (Step)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Tune, null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Text("배속 조절 최소 단위 (Step)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            "플레이어에서 배속을 미세 조절할 때 증감할 최소 단위입니다. (0.01 ~ 1.0, 기본값: 0.05)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                        )
+
+                        Text("현재 단위: $speedStep", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+
+                        val commonSteps = listOf(0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            commonSteps.forEach { step ->
+                                val isSelected = abs(speedStep - step) < 0.001
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = {
+                                        speedStep = step
+                                        customStepError = null
+                                        scope.launch { settings.setSpeedStep(step) }
+                                    },
+                                    label = {
+                                        Text(
+                                            "$step" + if (step == SettingsRepo.DEFAULT_SPEED_STEP) " (기본)" else "",
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        )
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            OutlinedTextField(
+                                value = customStepInput,
+                                onValueChange = {
+                                    customStepInput = it
+                                    customStepError = null
+                                },
+                                label = { Text("단위 직접 입력") },
+                                placeholder = { Text("0.01 ~ 1.0 (예: 0.05)") },
+                                singleLine = true,
+                                isError = customStepError != null,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Done),
+                                keyboardActions = KeyboardActions(onDone = {
+                                    val res = SettingsRepo.validateSpeedStep(customStepInput)
+                                    if (res.isSuccess) {
+                                        val v = res.getOrThrow()
+                                        speedStep = v
+                                        customStepInput = ""
+                                        customStepError = null
+                                        scope.launch { settings.setSpeedStep(v) }
+                                    } else {
+                                        customStepError = res.exceptionOrNull()?.message
+                                    }
+                                }),
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(10.dp),
+                            )
+                            Button(
+                                onClick = {
+                                    val res = SettingsRepo.validateSpeedStep(customStepInput)
+                                    if (res.isSuccess) {
+                                        val v = res.getOrThrow()
+                                        speedStep = v
+                                        customStepInput = ""
+                                        customStepError = null
+                                        scope.launch { settings.setSpeedStep(v) }
+                                    } else {
+                                        customStepError = res.exceptionOrNull()?.message
+                                    }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.height(56.dp),
+                            ) {
+                                Text("적용")
+                            }
+                        }
+                        if (customStepError != null) {
+                            Text(
+                                customStepError!!,
+                                color = MaterialTheme.colorScheme.error,
+                                 style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(start = 4.dp, top = 2.dp),
+                            )
+                        }
+
+                        Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.End) {
+                            TextButton(onClick = {
+                                speedStep = SettingsRepo.DEFAULT_SPEED_STEP
+                                customStepError = null
+                                scope.launch { settings.setSpeedStep(SettingsRepo.DEFAULT_SPEED_STEP) }
+                            }) {
+                                Text("기본 단위(0.05)로 복원", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. 이어보기 재생 목록 (플레이리스트 옵션)
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.PlaylistPlay, null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Text("이어보기 재생 목록", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        }
+                        Text(
+                            "이어보기 화면에서 영상을 재생할 때 플레이어에 구성될 재생 목록의 기준을 선택합니다.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Gray,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                        )
+
+                        ContinuePlaylistMode.entries.forEach { mode ->
+                            val isSelected = continuePlaylistMode == mode.value
+                            OutlinedCard(
+                                onClick = {
+                                    continuePlaylistMode = mode.value
+                                    scope.launch { settings.setContinuePlaylistMode(mode.value) }
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                colors = CardDefaults.outlinedCardColors(
+                                    containerColor = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else Color.Transparent,
+                                ),
+                            ) {
+                                Row(
+                                    Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = null,
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(mode.title, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium)
+                                        Text(mode.subtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                    }
+                                }
                             }
                         }
                     }
@@ -2119,6 +2472,70 @@ fun SettingsScreen(onBack: () -> Unit) {
             },
         )
     }
+
+    if (showBulkPresetsDialog) {
+        AlertDialog(
+            onDismissRequest = { showBulkPresetsDialog = false },
+            title = { Text("배속 프리셋 일괄 편집") },
+            text = {
+                Column {
+                    Text(
+                        "쉼표, 공백, 줄바꿈으로 구분하여 여러 배속을 한 번에 입력할 수 있습니다.\n(0.1 ~ 5.0 범위, 소수점 둘째 자리까지)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = bulkPresetsInput,
+                        onValueChange = {
+                            bulkPresetsInput = it
+                            bulkPresetsError = null
+                        },
+                        isError = bulkPresetsError != null,
+                        minLines = 3,
+                        maxLines = 6,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                    )
+                    if (bulkPresetsError != null) {
+                        Text(
+                            bulkPresetsError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val res = SettingsRepo.validateAndParseSpeedPresets(bulkPresetsInput)
+                    if (res.isSuccess) {
+                        val list = res.getOrThrow()
+                        speedPresets = list
+                        scope.launch {
+                            settings.setSpeedPresets(list)
+                            if (defaultSpeed !in list) {
+                                val newDef = list.first()
+                                defaultSpeed = newDef
+                                settings.setDefaultSpeed(newDef)
+                            }
+                        }
+                        showBulkPresetsDialog = false
+                    } else {
+                        bulkPresetsError = res.exceptionOrNull()?.message ?: "유효하지 않은 입력입니다."
+                    }
+                }) {
+                    Text("저장")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBulkPresetsDialog = false }) {
+                    Text("취소")
+                }
+            },
+        )
+    }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -2206,6 +2623,34 @@ fun naturalKey(name: String): String {
         }
     }
     return sb.toString()
+}
+
+/**
+ * Builds playlist uris and start index for continue-watching playback.
+ * ORIGINAL_FOLDER: same folderId AND dirPath, ordered naturalKey.
+ * CONTINUE_LIST: continue-watching items preserving displayed order and clicked index.
+ */
+fun buildContinuePlaylist(
+    mode: ContinuePlaylistMode,
+    target: VideoEntity,
+    continueWatchingList: List<VideoEntity>,
+    folderVideos: List<VideoEntity>,
+): Pair<List<String>, Int> {
+    return when (mode) {
+        ContinuePlaylistMode.CONTINUE_LIST -> {
+            val uris = continueWatchingList.map { it.uri }
+            val idx = uris.indexOf(target.uri).coerceAtLeast(0)
+            uris to idx
+        }
+        ContinuePlaylistMode.ORIGINAL_FOLDER -> {
+            val sameFolderAndDir = folderVideos
+                .filter { it.folderId == target.folderId && it.dirPath == target.dirPath }
+                .sortedBy { naturalKey(it.name) }
+            val uris = sameFolderAndDir.map { it.uri }.ifEmpty { listOf(target.uri) }
+            val idx = uris.indexOf(target.uri).coerceAtLeast(0)
+            uris to idx
+        }
+    }
 }
 
 fun pct(f: Double): String = "${(f * 100).roundToInt()}%"

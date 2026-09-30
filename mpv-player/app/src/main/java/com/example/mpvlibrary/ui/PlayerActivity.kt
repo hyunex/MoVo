@@ -73,6 +73,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import java.util.Locale
 
 enum class AspectRatioMode(val title: String, val shortTitle: String) {
     BEST_FIT("기본 맞춤 (Best Fit)", "맞춤"),
@@ -145,6 +146,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var speed by mutableStateOf(1.0)
     private var preFastPlaySpeed = 1.0
     private var speedPresets by mutableStateOf<List<Double>>(SettingsRepo.DEFAULT_SPEED_PRESETS)
+    private var speedStep by mutableDoubleStateOf(SettingsRepo.DEFAULT_SPEED_STEP)
     private var videoTitle by mutableStateOf("")
     private var autoAdvance by mutableStateOf(false)
     // P0: configurable gestures & repeat
@@ -405,6 +407,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         SpeedDialog(
                             currentSpeed = speed,
                             presets = speedPresets,
+                            step = speedStep,
                             onSelectSpeed = { s ->
                                 applySpeed(s)
                                 showSpeedDialog = false
@@ -446,9 +449,30 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             }
             autoAdvance = settings.autoAdvance.first()
             speedPresets = settings.speedPresets.first()
-            speed = settings.defaultSpeed.first()
+            speedStep = settings.speedStep.first().let { step ->
+                if (step.isFinite() && step in 0.01..1.0) {
+                    (step * 100.0).roundToInt() / 100.0
+                } else {
+                    SettingsRepo.DEFAULT_SPEED_STEP
+                }
+            }
+            speed = settings.defaultSpeed.first().coerceIn(0.1, 5.0)
             preFastPlaySpeed = speed
             mpv("speed=$speed") { MPVLib.setPropertyDouble("speed", speed) }
+            lifecycleScope.launch {
+                settings.speedStep.collect { step ->
+                    if (step.isFinite() && step in 0.01..1.0) {
+                        speedStep = (step * 100.0).roundToInt() / 100.0
+                    }
+                }
+            }
+            lifecycleScope.launch {
+                settings.speedPresets.collect { presets ->
+                    if (presets.isNotEmpty()) {
+                        speedPresets = presets
+                    }
+                }
+            }
             subFontSize = settings.subFontSize.first().coerceIn(20.0, 120.0)
             subColorHex = settings.subColor.first().takeIf { it.matches(Regex("#[0-9A-Fa-f]{6}")) }
                 ?: SettingsRepo.DEFAULT_SUB_COLOR
@@ -922,12 +946,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun applySpeed(s: Double) {
-        speed = s
-        preFastPlaySpeed = s
-        mpv("speed=$s") { MPVLib.setPropertyDouble("speed", s) }
-        AppLog.i(TAG, "speed set to $s")
-        lifecycleScope.launch { settings.setDefaultSpeed(s) }
-        showHud(HudMode.ASPECT, "재생 속도: ${s}x")
+        val normalized = ((s * 100.0).roundToInt() / 100.0).coerceIn(0.1, 5.0)
+        speed = normalized
+        preFastPlaySpeed = normalized
+        mpv("speed=$normalized") { MPVLib.setPropertyDouble("speed", normalized) }
+        AppLog.i(TAG, "speed set to $normalized")
+        lifecycleScope.launch { settings.setDefaultSpeed(normalized) }
+        showHud(HudMode.ASPECT, "재생 속도: ${formatSpeed(normalized)}")
         resetControlsTimer()
     }
 
@@ -1082,7 +1107,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                     preFastPlaySpeed = speed
                                     val fs = fastSpeedSetting
                                     MPVLib.setPropertyDouble("speed", fs)
-                                    showHud(HudMode.FAST_PLAY, "⚡ ${fs}x 쾌속 재생 중", autoDismiss = false)
+                                    showHud(HudMode.FAST_PLAY, "⚡ ${formatSpeed(fs)} 쾌속 재생 중", autoDismiss = false)
                                 }
                             }
 
@@ -1336,7 +1361,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 ) {
                     Icon(Icons.Default.Speed, null, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(3.dp))
-                    Text(if (speed % 1.0 == 0.0) "${speed.toInt()}x" else "${speed}x", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(formatSpeed(speed), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
 
                 Spacer(Modifier.width(4.dp))
@@ -1896,14 +1921,31 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     // ---------------------------------------------------------------- Unified Speed Dialog
 
+    private fun formatSpeed(v: Double): String {
+        val r = (v * 100.0).roundToInt() / 100.0
+        val formatted = if (r % 1.0 == 0.0) {
+            "${r.toInt()}"
+        } else {
+            "%.2f".format(Locale.US, r).trimEnd('0').trimEnd('.')
+        }
+        return "${formatted}x"
+    }
+
     @Composable
     private fun SpeedDialog(
         currentSpeed: Double,
         presets: List<Double>,
+        step: Double = SettingsRepo.DEFAULT_SPEED_STEP,
         onSelectSpeed: (Double) -> Unit,
         onDismiss: () -> Unit,
     ) {
-        var tempSpeed by remember { mutableDoubleStateOf(currentSpeed) }
+        val safeStep = if (step.isFinite() && step in 0.01..1.0) {
+            (step * 100.0).roundToInt() / 100.0
+        } else {
+            SettingsRepo.DEFAULT_SPEED_STEP
+        }
+        val stepCents = (safeStep * 100.0).roundToInt().coerceIn(1, 100)
+        var tempSpeed by remember { mutableDoubleStateOf(currentSpeed.coerceIn(0.1, 5.0)) }
 
         AlertDialog(
             onDismissRequest = onDismiss,
@@ -1911,7 +1953,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Speed, null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(8.dp))
-                    Text("재생 속도 (현재: ${(tempSpeed * 100).roundToInt() / 100.0}x)")
+                    Text("재생 속도 (현재: ${formatSpeed(tempSpeed)})")
                 }
             },
             text = {
@@ -1930,7 +1972,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         presets.forEach { s ->
-                            val isSel = abs(s - tempSpeed) < 0.01
+                            val isSel = abs(s - tempSpeed) < 0.001
                             FilterChip(
                                 selected = isSel,
                                 onClick = {
@@ -1938,7 +1980,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                     onSelectSpeed(s)
                                 },
                                 label = {
-                                    Text(if (s % 1.0 == 0.0) "${s.toInt()}x" else "${s}x")
+                                    Text(formatSpeed(s))
                                 },
                                 shape = RoundedCornerShape(8.dp),
                             )
@@ -1949,7 +1991,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     HorizontalDivider()
                     Spacer(Modifier.height(12.dp))
 
-                    Text("미세 속도 조절", style = MaterialTheme.typography.titleSmall, color = Color.Gray)
+                    Text(
+                        "미세 속도 조절 (단위: ±${formatSpeed(safeStep)})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Color.Gray,
+                    )
                     Spacer(Modifier.height(8.dp))
 
                     Row(
@@ -1959,29 +2005,40 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     ) {
                         IconButton(
                             onClick = {
-                                val s = ((tempSpeed - 0.05) * 100.0).roundToInt() / 100.0
-                                tempSpeed = s.coerceIn(0.25, 3.0)
+                                val curCents = (tempSpeed * 100.0).roundToInt()
+                                val newCents = (curCents - stepCents).coerceIn(10, 500)
+                                tempSpeed = newCents / 100.0
                             },
                             modifier = Modifier.size(40.dp),
                         ) {
-                            Icon(Icons.Default.Remove, "속도 감소")
+                            Icon(Icons.Default.Remove, "속도 감소 (-${formatSpeed(safeStep)})")
                         }
 
                         Slider(
-                            value = tempSpeed.toFloat(),
-                            onValueChange = { tempSpeed = (it * 100.0).roundToInt() / 100.0 },
-                            valueRange = 0.25f..3.0f,
+                            value = tempSpeed.toFloat().coerceIn(0.1f, 5.0f),
+                            onValueChange = { raw ->
+                                tempSpeed = when {
+                                    raw <= 0.1001f -> 0.1
+                                    raw >= 4.9999f -> 5.0
+                                    else -> {
+                                        val steps = (raw.toDouble() * 100.0 / stepCents).roundToInt()
+                                        (steps * stepCents).coerceIn(10, 500) / 100.0
+                                    }
+                                }
+                            },
+                            valueRange = 0.1f..5.0f,
                             modifier = Modifier.weight(1f),
                         )
 
                         IconButton(
                             onClick = {
-                                val s = ((tempSpeed + 0.05) * 100.0).roundToInt() / 100.0
-                                tempSpeed = s.coerceIn(0.25, 3.0)
+                                val curCents = (tempSpeed * 100.0).roundToInt()
+                                val newCents = (curCents + stepCents).coerceIn(10, 500)
+                                tempSpeed = newCents / 100.0
                             },
                             modifier = Modifier.size(40.dp),
                         ) {
-                            Icon(Icons.Default.Add, "속도 증가")
+                            Icon(Icons.Default.Add, "속도 증가 (+${formatSpeed(safeStep)})")
                         }
                     }
 

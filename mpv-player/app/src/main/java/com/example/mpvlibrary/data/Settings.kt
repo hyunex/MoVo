@@ -26,6 +26,18 @@ enum class VideoAlign(val value: String, val title: String, val subtitle: String
 }
 
 /**
+ * Options for continue-watching playback playlist generation.
+ */
+enum class ContinuePlaylistMode(val value: String, val title: String, val subtitle: String) {
+    ORIGINAL_FOLDER("folder", "원본 동영상 폴더", "같은 폴더(동일 디렉터리 경로)의 영상들을 이름순으로 재생 (기본값)"),
+    CONTINUE_LIST("continue_list", "이어보기 목록", "화면에 표시된 이어보기 영상들을 순서대로 재생");
+
+    companion object {
+        fun fromValue(v: String?): ContinuePlaylistMode = entries.find { it.value == v } ?: ORIGINAL_FOLDER
+    }
+}
+
+/**
  * Persistent user settings:
  * - default playback speed & customizable speed presets list
  * - natural language video alignment (video-align-y)
@@ -37,6 +49,8 @@ class SettingsRepo(private val context: Context) {
     companion object {
         val KEY_SPEED = doublePreferencesKey("default_speed")
         val KEY_SPEED_PRESETS = stringPreferencesKey("speed_presets")
+        val KEY_SPEED_STEP = doublePreferencesKey("speed_step")
+        val KEY_CONTINUE_PLAYLIST = stringPreferencesKey("continue_playlist_source")
         val KEY_VIDEO_ALIGN_Y = stringPreferencesKey("video_align_y")
         val KEY_THRESHOLD = doublePreferencesKey("watched_threshold")
         val KEY_AUTO_ADVANCE = booleanPreferencesKey("auto_advance")
@@ -55,18 +69,92 @@ class SettingsRepo(private val context: Context) {
         val SUB_COLOR_PRESETS = listOf("#FFFFFF", "#FFFF00", "#00FFFF", "#00FF00", "#FF80C0")
 
         val DEFAULT_SPEED_PRESETS = listOf(0.5, 0.75, 1.0, 1.2, 1.25, 1.5, 1.75, 2.0)
+        const val DEFAULT_SPEED_STEP = 0.05
+        const val DEFAULT_CONTINUE_PLAYLIST = "folder"
         const val DEFAULT_VIDEO_ALIGN_Y = "-1"
         const val DEFAULT_MPV_OPTIONS = ""
 
         fun parseSpeedPresets(raw: String?): List<Double> {
             if (raw.isNullOrBlank()) return DEFAULT_SPEED_PRESETS
-            val list = raw.split(",")
-                .mapNotNull { it.trim().toDoubleOrNull() }
-                .filter { it in 0.1..5.0 }
-                .map { (it * 100.0).toInt() / 100.0 } // 2 decimals
+            val tokens = raw.split(Regex("[,\\s]+")).map { it.trim() }.filter { it.isNotEmpty() }
+            val list = tokens
+                .mapNotNull { it.toDoubleOrNull() }
+                .filter { it.isFinite() && it in 0.1..5.0 }
+                .map { Math.round(it * 100.0) / 100.0 } // 2 decimals
                 .distinct()
                 .sorted()
             return list.ifEmpty { DEFAULT_SPEED_PRESETS }
+        }
+
+        /**
+         * Validates bulk preset input supporting comma/whitespace/newline separation.
+         * Rejects any invalid, non-finite, out-of-range (0.1..5.0) or >2 decimal values.
+         */
+        fun validateAndParseSpeedPresets(raw: String): Result<List<Double>> {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) {
+                return Result.failure(IllegalArgumentException("최소 1개 이상의 배속 값을 입력해 주세요."))
+            }
+            val tokens = trimmed.split(Regex("[,\\s]+")).map { it.trim() }.filter { it.isNotEmpty() }
+            if (tokens.isEmpty()) {
+                return Result.failure(IllegalArgumentException("최소 1개 이상의 배속 값을 입력해 주세요."))
+            }
+            val result = mutableListOf<Double>()
+            for (token in tokens) {
+                val num = token.toDoubleOrNull()
+                if (num == null || !num.isFinite()) {
+                    return Result.failure(IllegalArgumentException("올바른 숫자가 아닙니다: '$token'"))
+                }
+                if (num < 0.1 || num > 5.0) {
+                    return Result.failure(IllegalArgumentException("배속 범위는 0.1 ~ 5.0 사이여야 합니다: '$token'"))
+                }
+                val dot = token.indexOf('.')
+                if (dot >= 0) {
+                    val decPart = token.substring(dot + 1).trimEnd('0')
+                    if (decPart.length > 2) {
+                        return Result.failure(IllegalArgumentException("소수점은 최대 2자리까지만 지원합니다: '$token'"))
+                    }
+                }
+                if (Math.abs(Math.round(num * 100.0) - num * 100.0) > 1e-5) {
+                    return Result.failure(IllegalArgumentException("소수점은 최대 2자리까지만 지원합니다: '$token'"))
+                }
+                val rounded = Math.round(num * 100.0) / 100.0
+                result.add(rounded)
+            }
+            val distinctSorted = result.distinct().sorted()
+            if (distinctSorted.isEmpty()) {
+                return Result.failure(IllegalArgumentException("유효한 배속 값이 없습니다."))
+            }
+            return Result.success(distinctSorted)
+        }
+
+        /**
+         * Validates configurable speed increment (step) in 0.01..1.0 with max 2 decimals.
+         */
+        fun validateSpeedStep(raw: String): Result<Double> {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) {
+                return Result.failure(IllegalArgumentException("배속 단위를 입력해 주세요."))
+            }
+            val num = trimmed.toDoubleOrNull()
+            if (num == null || !num.isFinite()) {
+                return Result.failure(IllegalArgumentException("올바른 숫자가 아닙니다: '$trimmed'"))
+            }
+            if (num < 0.01 || num > 1.0) {
+                return Result.failure(IllegalArgumentException("배속 단위는 0.01 ~ 1.0 사이여야 합니다: '$trimmed'"))
+            }
+            val dot = trimmed.indexOf('.')
+            if (dot >= 0) {
+                val decPart = trimmed.substring(dot + 1).trimEnd('0')
+                if (decPart.length > 2) {
+                    return Result.failure(IllegalArgumentException("소수점은 최대 2자리까지만 지원합니다: '$trimmed'"))
+                }
+            }
+            if (Math.abs(Math.round(num * 100.0) - num * 100.0) > 1e-5) {
+                return Result.failure(IllegalArgumentException("소수점은 최대 2자리까지만 지원합니다: '$trimmed'"))
+            }
+            val rounded = Math.round(num * 100.0) / 100.0
+            return Result.success(rounded)
         }
 
         fun formatSpeedPresets(list: List<Double>): String =
@@ -144,6 +232,19 @@ class SettingsRepo(private val context: Context) {
     }
     suspend fun setSpeedPresets(presets: List<Double>) {
         context.dataStore.edit { it[KEY_SPEED_PRESETS] = formatSpeedPresets(presets) }
+    }
+    val speedStep: Flow<Double> = context.dataStore.data.map { it[KEY_SPEED_STEP] ?: DEFAULT_SPEED_STEP }
+    suspend fun setSpeedStep(v: Double) {
+        if (!v.isFinite()) return
+        val rounded = (Math.round(v.coerceIn(0.01, 1.0) * 100.0)) / 100.0
+        context.dataStore.edit { it[KEY_SPEED_STEP] = rounded }
+    }
+    val continuePlaylistMode: Flow<String> = context.dataStore.data.map {
+        it[KEY_CONTINUE_PLAYLIST] ?: DEFAULT_CONTINUE_PLAYLIST
+    }
+    suspend fun setContinuePlaylistMode(v: String) {
+        val valid = ContinuePlaylistMode.fromValue(v).value
+        context.dataStore.edit { it[KEY_CONTINUE_PLAYLIST] = valid }
     }
     suspend fun setVideoAlignY(v: String) {
         // 허용값 외 입력은 mpv 주입이 아닌 TOP으로 정규화.

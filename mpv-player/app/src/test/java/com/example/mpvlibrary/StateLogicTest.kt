@@ -3,8 +3,10 @@ package com.example.mpvlibrary
 import com.example.mpvlibrary.data.SettingsRepo
 import com.example.mpvlibrary.data.VideoAlign
 import com.example.mpvlibrary.data.VideoEntity
+import com.example.mpvlibrary.data.ContinuePlaylistMode
 import com.example.mpvlibrary.mpv.MpvPath
 import com.example.mpvlibrary.ui.naturalKey
+import com.example.mpvlibrary.ui.buildContinuePlaylist
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -137,5 +139,115 @@ class StateLogicTest {
             listOf("Ep01.SRT"),
             MpvPath.matchSubtitles("Ep01.mp4", listOf("Ep01.SRT")),
         )
+    }
+
+    @Test fun continuePlaylistBehavior() {
+        val v1 = VideoEntity(uri = "u1", folderId = 1, name = "Ep 1.mp4", dirPath = "")
+        val v2 = VideoEntity(uri = "u2", folderId = 1, name = "Ep 10.mp4", dirPath = "")
+        val v3 = VideoEntity(uri = "u3", folderId = 1, name = "SP 1.mp4", dirPath = "Specials")
+        val v4 = VideoEntity(uri = "u4", folderId = 2, name = "Ep 1.mp4", dirPath = "")
+        val allVideos = listOf(v2, v4, v1, v3) // un-ordered
+        val continueWatching = listOf(v3, v1, v4)
+
+        // ORIGINAL_FOLDER: same folderId AND dirPath, ordered naturalKey
+        val (uris1, idx1) = buildContinuePlaylist(
+            mode = ContinuePlaylistMode.ORIGINAL_FOLDER,
+            target = v1,
+            continueWatchingList = continueWatching,
+            folderVideos = allVideos,
+        )
+        assertEquals(listOf("u1", "u2"), uris1)
+        assertEquals(0, idx1)
+
+        val (uris2, idx2) = buildContinuePlaylist(
+            mode = ContinuePlaylistMode.ORIGINAL_FOLDER,
+            target = v2,
+            continueWatchingList = continueWatching,
+            folderVideos = allVideos,
+        )
+        assertEquals(listOf("u1", "u2"), uris2)
+        assertEquals(1, idx2)
+
+        val (uris3, idx3) = buildContinuePlaylist(
+            mode = ContinuePlaylistMode.ORIGINAL_FOLDER,
+            target = v3,
+            continueWatchingList = continueWatching,
+            folderVideos = allVideos,
+        )
+        assertEquals(listOf("u3"), uris3)
+        assertEquals(0, idx3)
+
+        // CONTINUE_LIST: preserves continue-watching displayed order and clicked index
+        val (urisCont, idxCont) = buildContinuePlaylist(
+            mode = ContinuePlaylistMode.CONTINUE_LIST,
+            target = v1,
+            continueWatchingList = continueWatching,
+            folderVideos = allVideos,
+        )
+        assertEquals(listOf("u3", "u1", "u4"), urisCont)
+        assertEquals(1, idxCont)
+    }
+
+    @Test fun bulkSpeedPresetsStrictValidation() {
+        // Supports comma, whitespace, newline separation
+        val validRes = SettingsRepo.validateAndParseSpeedPresets("0.5, 0.75\n1.0\t1.25  1.5, 2.0")
+        assertTrue(validRes.isSuccess)
+        assertEquals(listOf(0.5, 0.75, 1.0, 1.25, 1.5, 2.0), validRes.getOrThrow())
+
+        // Merges duplicates, sorts, 2 decimals
+        val dedupRes = SettingsRepo.validateAndParseSpeedPresets("2.0, 1.0, 1.5, 1.0, 2.00")
+        assertTrue(dedupRes.isSuccess)
+        assertEquals(listOf(1.0, 1.5, 2.0), dedupRes.getOrThrow())
+
+        // Boundary values (0.1..5.0)
+        val boundRes = SettingsRepo.validateAndParseSpeedPresets("0.1, 5.0")
+        assertTrue(boundRes.isSuccess)
+        assertEquals(listOf(0.1, 5.0), boundRes.getOrThrow())
+
+        // Strict rejection: empty / blank
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("").isFailure)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("   \n\t").isFailure)
+
+        // Strict rejection: out of range (does not silently drop)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("0.05").isFailure)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("5.1").isFailure)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("1.0, 0.05, 2.0").isFailure)
+
+        // Strict rejection: >2 decimals (does not silently drop)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("1.125").isFailure)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("1.0, 1.234, 2.0").isFailure)
+
+        // Strict rejection: invalid tokens (does not silently drop)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("1.0, abc, 2.0").isFailure)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("NaN").isFailure)
+        assertTrue(SettingsRepo.validateAndParseSpeedPresets("Infinity").isFailure)
+    }
+
+    @Test fun speedStepValidation() {
+        // Valid steps: finite 0.01..1.0 with max 2 decimals
+        val s1 = SettingsRepo.validateSpeedStep("0.05")
+        assertTrue(s1.isSuccess)
+        assertEquals(0.05, s1.getOrThrow(), 0.0001)
+
+        val s2 = SettingsRepo.validateSpeedStep("0.01")
+        assertTrue(s2.isSuccess)
+        assertEquals(0.01, s2.getOrThrow(), 0.0001)
+
+        val s3 = SettingsRepo.validateSpeedStep("1.0")
+        assertTrue(s3.isSuccess)
+        assertEquals(1.0, s3.getOrThrow(), 0.0001)
+
+        val s4 = SettingsRepo.validateSpeedStep("0.25")
+        assertTrue(s4.isSuccess)
+        assertEquals(0.25, s4.getOrThrow(), 0.0001)
+
+        // Invalid steps
+        assertTrue(SettingsRepo.validateSpeedStep("").isFailure)
+        assertTrue(SettingsRepo.validateSpeedStep("0.0").isFailure)
+        assertTrue(SettingsRepo.validateSpeedStep("0.005").isFailure)
+        assertTrue(SettingsRepo.validateSpeedStep("1.01").isFailure)
+        assertTrue(SettingsRepo.validateSpeedStep("-0.05").isFailure)
+        assertTrue(SettingsRepo.validateSpeedStep("abc").isFailure)
+        assertTrue(SettingsRepo.validateSpeedStep("0.025").isFailure)
     }
 }
