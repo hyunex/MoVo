@@ -23,6 +23,8 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE id = :id")
     suspend fun byId(id: Long): FolderEntity?
 
+    @Query("SELECT * FROM folders WHERE treeUri = :treeUri")
+    suspend fun byTreeUri(treeUri: String): FolderEntity?
     @Query("UPDATE folders SET treeUri = :treeUri, displayName = :displayName WHERE id = :id")
     suspend fun updateTree(id: Long, treeUri: String, displayName: String)
 }
@@ -48,11 +50,8 @@ interface VideoDao {
     suspend fun insertNew(videos: List<VideoEntity>)
 
     /** Refresh filesystem metadata only — never touches playback progress. */
-    @Query("UPDATE videos SET name = :name, dirPath = :dirPath, sizeBytes = :size, lastModified = :modified WHERE uri = :uri")
-    suspend fun refreshMeta(uri: String, name: String, dirPath: String, size: Long, modified: Long)
-
-    @Query("DELETE FROM videos WHERE folderId = :folderId AND uri NOT IN (:uris)")
-    suspend fun deleteStale(folderId: Long, uris: List<String>)
+    @Query("UPDATE videos SET name = :name, dirPath = :dirPath, sizeBytes = :size, lastModified = :modified WHERE uri = :uri AND (name != :name OR dirPath != :dirPath OR sizeBytes != :size OR lastModified != :modified)")
+    suspend fun refreshMetaIfChanged(uri: String, name: String, dirPath: String, size: Long, modified: Long)
 
     @Query("DELETE FROM videos WHERE folderId = :folderId")
     suspend fun deleteForFolder(folderId: Long)

@@ -5,68 +5,205 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.security.MessageDigest
+import kotlin.coroutines.coroutineContext
 
-/** Disk-cached video thumbnails extracted with MediaMetadataRetriever. */
+/** Metadata-keyed disk thumbnails; only cache misses share the extraction lock. */
 object Thumbs {
     private const val TARGET_PX = 256
     private const val MAX_THUMBS_BYTES = 50L * 1024 * 1024
     private const val MAX_THUMB_FILES = 500
-    private fun cacheFile(context: Context, uri: String): File {
-        val hash = MessageDigest.getInstance("SHA-1").digest(uri.toByteArray())
-            .joinToString("") { "%02x".format(it) }
-        return File(File(context.cacheDir, "thumbs").apply { mkdirs() }, "$hash.jpg")
+    private const val PRUNE_EVERY_WRITES = 32
+    private val extractionMutex = Mutex()
+    private val legacyName = Regex("[0-9a-fA-F]{40}\\.jpg")
+    private val cacheName = Regex("v2_[0-9a-f]{64}\\.jpg")
+    private var initializedDirectory: File? = null
+    private var writesSincePrune = 0
+
+    private fun cacheFile(directory: File, uri: String, sizeBytes: Long, lastModified: Long): File {
+        val identity = "v2\n${uri.length}:$uri\n$sizeBytes\n$lastModified"
+        val digest = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
+        val hex = CharArray(digest.size * 2)
+        val digits = "0123456789abcdef"
+        digest.forEachIndexed { index, byte ->
+            val value = byte.toInt() and 0xff
+            hex[index * 2] = digits[value ushr 4]
+            hex[index * 2 + 1] = digits[value and 0xf]
+        }
+        return File(directory, "v2_${String(hex)}.jpg")
     }
 
-    suspend fun get(context: Context, uriString: String): Bitmap? = withContext(Dispatchers.IO) {
-        val file = cacheFile(context, uriString)
-        if (file.exists()) {
-            BitmapFactory.decodeFile(file.absolutePath)?.let { return@withContext it }
-        }
-        val retriever = MediaMetadataRetriever()
-        try {
-            retriever.setDataSource(context, Uri.parse(uriString))
-            // Grab a frame 10% in (fallback 0) so black intro frames are less likely.
-            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
-            val usec = ((durationMs ?: 1000L) / 10 * 1000L)
-            var bmp: Bitmap? = retriever.getFrameAtTime(usec, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-            if (bmp == null) bmp = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-            if (bmp == null) return@withContext null
-            val scaled = scaleDown(bmp)
-            FileOutputStream(file).use { scaled.compress(Bitmap.CompressFormat.JPEG, 80, it) }
-            prune(context)
-            scaled
-        } catch (_: Exception) {
-            null
-        } finally {
-            runCatching { retriever.release() }
+    suspend fun get(
+        context: Context,
+        uri: String,
+        sizeBytes: Long,
+        lastModified: Long,
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+        val directory = File(context.cacheDir, "thumbs")
+        val file = cacheFile(directory, uri, sizeBytes, lastModified)
+        decodeCached(file)?.let { return@withContext it }
+        extractionMutex.withLock {
+            coroutineContext.ensureActive()
+            if (initializedDirectory != directory) {
+                directory.mkdirs()
+                prune(directory, removeLegacy = true)
+                initializedDirectory = directory
+                writesSincePrune = 0
+            }
+            // Another waiter may have published this exact metadata revision.
+            decodeCached(file)?.let { return@withLock it }
+            // An interrupted or corrupt JPEG must never block future extraction.
+            if (file.exists()) file.delete()
+            extract(context, uri, file, directory)
         }
     }
-    private fun prune(context: Context) {
-        runCatching {
-            val dir = File(context.cacheDir, "thumbs")
-            val files = dir.listFiles()?.sortedBy { it.lastModified() } ?: return
-            var total = files.sumOf { it.length() }
-            var count = files.size
-            for (f in files) {
-                if (total <= MAX_THUMBS_BYTES && count <= MAX_THUMB_FILES) break
-                total -= f.length()
-                count--
-                f.delete()
+
+    private suspend fun decodeCached(file: File): Bitmap? {
+        coroutineContext.ensureActive()
+        if (!file.isFile) return null
+        val bitmap = try {
+            // Our cache is already bounded to 256px; a second bounds pass adds only I/O.
+            BitmapFactory.decodeFile(file.absolutePath)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+        try {
+            coroutineContext.ensureActive()
+            return bitmap
+        } catch (cancelled: CancellationException) {
+            bitmap?.recycle()
+            throw cancelled
+        }
+    }
+
+    private suspend fun extract(context: Context, uri: String, file: File, directory: File): Bitmap? {
+        var retriever: MediaMetadataRetriever? = null
+        var ownedBitmap: Bitmap? = null
+        try {
+            coroutineContext.ensureActive()
+            val source = MediaMetadataRetriever()
+            retriever = source
+            coroutineContext.ensureActive()
+            source.setDataSource(context, Uri.parse(uri))
+            coroutineContext.ensureActive()
+            val durationMs = source.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            val usec = ((durationMs ?: 1000L) / 10 * 1000L)
+            coroutineContext.ensureActive()
+            ownedBitmap = frame(source, usec)
+            coroutineContext.ensureActive()
+            if (ownedBitmap == null) {
+                ownedBitmap = frame(source, 0)
+                coroutineContext.ensureActive()
+            }
+            val original = ownedBitmap ?: return null
+            val scaled = scaleDown(original)
+            if (scaled !== original) {
+                ownedBitmap = scaled
+                original.recycle()
+            }
+            coroutineContext.ensureActive()
+            publish(scaled, file, directory)
+            coroutineContext.ensureActive()
+            // Ownership passes to Compose; never recycle a returned bitmap.
+            ownedBitmap = null
+            return scaled
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            coroutineContext.ensureActive()
+            return null
+        } finally {
+            ownedBitmap?.recycle()
+            try {
+                retriever?.release()
+            } catch (_: Exception) {
+                // A release failure must not hide extraction cancellation.
             }
         }
     }
 
-    private fun scaleDown(bmp: Bitmap): Bitmap {
-        val ratio = TARGET_PX.toFloat() / maxOf(bmp.width, bmp.height)
-        if (ratio >= 1f) return bmp
+    private fun frame(retriever: MediaMetadataRetriever, timeUs: Long): Bitmap? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            retriever.getScaledFrameAtTime(
+                timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, TARGET_PX, TARGET_PX,
+            )
+        } else {
+            // API 26 has no scaled extraction API: temporarily decode the full frame.
+            retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        }
+
+    private suspend fun publish(bitmap: Bitmap, file: File, directory: File) {
+        var temporary: File? = null
+        var published = false
+        try {
+            coroutineContext.ensureActive()
+            temporary = File.createTempFile("v2_", ".tmp", directory)
+            FileOutputStream(temporary).use { output ->
+                coroutineContext.ensureActive()
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 80, output)) {
+                    throw IOException("Thumbnail compression failed")
+                }
+            }
+            coroutineContext.ensureActive()
+            if (!temporary.renameTo(file)) throw IOException("Thumbnail publication failed")
+            published = true
+            coroutineContext.ensureActive()
+            writesSincePrune++
+            if (writesSincePrune >= PRUNE_EVERY_WRITES) {
+                prune(directory)
+                writesSincePrune = 0
+            }
+        } catch (cancelled: CancellationException) {
+            if (published) file.delete()
+            throw cancelled
+        } catch (_: Exception) {
+            // A disk-cache failure should not discard an otherwise usable frame.
+            coroutineContext.ensureActive()
+        } finally {
+            temporary?.delete()
+        }
+    }
+
+    private fun prune(directory: File, removeLegacy: Boolean = false) {
+        // At most 31 newly written 256px JPEGs overshoot the 50MiB / 500-file limits
+        // between batches (assuming deletions succeed); never touch unrelated files.
+        val entries = directory.listFiles() ?: return
+        if (removeLegacy) {
+            entries.filter { it.isFile && legacyName.matches(it.name) }.forEach { it.delete() }
+        }
+        val files = entries.filter { it.isFile && cacheName.matches(it.name) }
+            .sortedBy { it.lastModified() }
+        var total = files.sumOf { it.length() }
+        var count = files.size
+        for (file in files) {
+            if (total <= MAX_THUMBS_BYTES && count <= MAX_THUMB_FILES) break
+            val bytes = file.length()
+            if (file.delete()) {
+                total -= bytes
+                count--
+            }
+        }
+    }
+
+    private fun scaleDown(bitmap: Bitmap): Bitmap {
+        val ratio = TARGET_PX.toFloat() / maxOf(bitmap.width, bitmap.height)
+        if (ratio >= 1f) return bitmap
         return Bitmap.createScaledBitmap(
-            bmp, (bmp.width * ratio).toInt().coerceAtLeast(1),
-            (bmp.height * ratio).toInt().coerceAtLeast(1), true,
+            bitmap, (bitmap.width * ratio).toInt().coerceAtLeast(1),
+            (bitmap.height * ratio).toInt().coerceAtLeast(1), true,
         )
     }
 }

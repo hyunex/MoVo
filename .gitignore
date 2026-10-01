@@ -9,6 +9,16 @@ local.properties
 # Signing keystores (never commit)
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.pk8
+*.key
+*.pass
+*.password
+*.password.txt
+/.movo-signing/
+/release-artifacts/
+/.release-staging-*/
 
 # Debug logs & local artifacts
 *.log

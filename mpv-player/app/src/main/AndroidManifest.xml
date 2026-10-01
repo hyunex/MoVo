@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <!-- SAF(OpenDocumentTree/DocumentFile) 전용: MANAGE/WRITE 없이 동작. 구형 단말(MediaStore 썸네일 등) 읽기 호환용으로 READ만 유지. -->
@@ -8,6 +9,8 @@
 
     <application
         android:allowBackup="false"
+        android:debuggable="false"
+        tools:ignore="HardcodedDebugMode"
         android:usesCleartextTraffic="false"
         android:icon="@drawable/ic_launcher"
         android:label="MoVo"

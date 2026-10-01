@@ -1,5 +1,6 @@
 package com.example.mpvlibrary
 
+import com.example.mpvlibrary.data.AppLog
 import com.example.mpvlibrary.data.SettingsRepo
 import com.example.mpvlibrary.data.VideoAlign
 import com.example.mpvlibrary.data.VideoEntity
@@ -7,6 +8,8 @@ import com.example.mpvlibrary.data.ContinuePlaylistMode
 import com.example.mpvlibrary.mpv.MpvPath
 import com.example.mpvlibrary.ui.naturalKey
 import com.example.mpvlibrary.ui.buildContinuePlaylist
+import com.example.mpvlibrary.ui.PlaybackEndAction
+import com.example.mpvlibrary.ui.playbackEndAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -50,37 +53,71 @@ class StateLogicTest {
         assertEquals(0.0, video(100.0, 0.0).fraction, 0.0)
     }
 
-    @Test fun mpvOptionsParsing() {
-        val opts = SettingsRepo.parseOptions(
-            "# comment\n\nhwdec=auto\nprofile=fast\n",
+    @Test fun mpvSafeOptionsPreserveValuesAndNormalizeKeys() {
+        val parsed = SettingsRepo.parseMpvOptions(
+            "# comment\n\n -- HWDEC = auto\nprofile=fast\nVIDEO_ALIGN_Y=-1\nspeed=1.25\nvf=scale=1280:720\naf=volume=0.5\n",
         )
         assertEquals(
-            listOf("hwdec" to "auto", "profile" to "fast"),
-            opts,
+            listOf("hwdec" to "auto", "profile" to "fast", "video-align-y" to "-1",
+                "speed" to "1.25", "vf" to "scale=1280:720", "af" to "volume=0.5"),
+            parsed.options,
         )
-    }
-    @Test fun mpvDangerousOptionsBlocked() {
-        val opts = SettingsRepo.parseOptions(
-            "hwdec=auto\nconfig-dir=/tmp\nload-script=evil.lua\nhttp-header-fields=x\nscreenshot-directory=/tmp\n",
-        )
-        assertEquals(listOf("hwdec" to "auto"), opts)
-        assertTrue(SettingsRepo.isBlockedOption("config-dir"))
-        assertTrue(SettingsRepo.isBlockedOption("SCRIPT-OPTS"))
-        assertFalse(SettingsRepo.isBlockedOption("hwdec"))
+        assertTrue(parsed.rejected.isEmpty())
+        assertEquals("# comment\n\nhwdec=auto\nprofile=fast\nvideo-align-y=-1\nspeed=1.25\nvf=scale=1280:720\naf=volume=0.5\n",
+            parsed.normalizedText)
     }
 
-    @Test fun mpvBlockedOptionDashBypassClosed() {
-        // "--config-dir"처럼 대시를 붙여도 차단되어야 한다.
-        assertTrue(SettingsRepo.isBlockedOption("--config-dir"))
-        assertTrue(SettingsRepo.isBlockedOption("---load-script"))
-        assertTrue(SettingsRepo.isBlockedOption("-- input-conf"))
-        assertTrue(SettingsRepo.isBlockedOption("sub-file"))
-        assertTrue(SettingsRepo.isBlockedOption("--ytdl-path"))
-        assertTrue(SettingsRepo.isBlockedOption("--stream-dump"))
-        assertTrue(SettingsRepo.isBlockedOption("input-commands"))
-        assertFalse(SettingsRepo.isBlockedOption("hwdec"))
-        val opts = SettingsRepo.parseOptions("--hwdec=auto\n--config-dir=/tmp\nsub-file=x.srt\n")
-        assertEquals(listOf("hwdec" to "auto"), opts)
+    @Test fun mpvFileWritersCannotEnterAcceptedOptionsViaAliases() {
+        val keys = listOf("log-file", "--LOG_FILE", "-- no-log-file", "stream-record",
+            "stream-dump", "screenshot-dir", "screenshot-directory", "screenshot-template",
+            "watch-later-directory", "save-position-on-quit", "no-save-position-on-quit",
+            "cache-dir", "cache-on-disk", "gpu-shader-cache-dir", "icc-cache-dir",
+            "o", "ovc", "oac", "of", "ofopts", "ovcopts", "oacopts", "orawts",
+            "ocopy-metadata", "oset-metadata", "oremove-metadata")
+        val parsed = SettingsRepo.parseMpvOptions(
+            keys.joinToString("\n") { "$it=private-output" } + "\nhwdec=auto",
+        )
+        assertEquals(listOf("hwdec" to "auto"), parsed.options)
+        assertEquals(keys.size, parsed.rejected.size)
+        assertTrue(parsed.rejected.all { it.reason == SettingsRepo.OptionRejectionReason.FILE_WRITING })
+        assertFalse(parsed.rejectionMessage().contains("private-output"))
+    }
+
+    @Test fun mpvOutputSelectorsAndListOperationsRemainAppManaged() {
+        val keys = listOf("ao", "vo", "-- AO_APPEND", "vo-add", "ao-pre", "vo-del",
+            "ao-clr", "vo-set", "ao-toggle", "vo-remove", "ao-help", "no-vo",
+            "no-ao-append")
+        val parsed = SettingsRepo.parseMpvOptions(keys.joinToString("\n") { "$it=pcm:file=secret" })
+        assertTrue(parsed.options.isEmpty())
+        assertEquals(keys.size, parsed.rejected.size)
+        assertTrue(parsed.rejected.all { it.reason == SettingsRepo.OptionRejectionReason.OUTPUT_MANAGEMENT })
+        assertFalse(parsed.rejectionMessage().contains("secret"))
+    }
+
+    @Test fun mpvExistingSecurityRestrictionsKeepCategoricalReasons() {
+        val parsed = SettingsRepo.parseMpvOptions(
+            "--config-dir=secret\n---load-script=secret\nhttp-header-fields=secret\n" +
+                "-- input-conf=secret\nsub-file=secret\n--ytdl-path=secret\nhwdec=auto",
+        )
+        assertEquals(listOf("hwdec" to "auto"), parsed.options)
+        assertEquals(
+            listOf(SettingsRepo.OptionRejectionReason.CONFIG, SettingsRepo.OptionRejectionReason.SCRIPTS,
+                SettingsRepo.OptionRejectionReason.NETWORK, SettingsRepo.OptionRejectionReason.APP_CONTROLLED,
+                SettingsRepo.OptionRejectionReason.EXTERNAL_PATHS, SettingsRepo.OptionRejectionReason.SCRIPTS),
+            parsed.rejected.map { it.reason },
+        )
+        assertFalse(parsed.rejectionMessage().contains("secret"))
+    }
+
+    @Test fun mpvMalformedLinesAreRejectedRatherThanSilentlyLost() {
+        val parsed = SettingsRepo.parseMpvOptions(
+            "# normal comment\n\nprivate-missing-equals\n=secret\nbad key=secret\nhwdec=\nprofile=fast",
+        )
+        assertEquals(listOf("profile" to "fast"), parsed.options)
+        assertEquals(4, parsed.rejected.size)
+        assertTrue(parsed.rejected.all { it.reason == SettingsRepo.OptionRejectionReason.MALFORMED })
+        assertFalse(parsed.rejectionMessage().contains("secret"))
+        assertFalse(parsed.rejectionMessage().contains("private-missing-equals"))
     }
 
     @Test fun resolveFileRejectsTraversal() {
@@ -89,10 +126,83 @@ class StateLogicTest {
         assertEquals(null, MpvPath.resolveFile("file:///etc/passwd"))
     }
 
-    @Test fun logPathMasking() {
-        val masked = com.example.mpvlibrary.data.AppLog.maskPaths("open /storage/emulated/0/Movies/a.mp4 ok")
-        assertFalse(masked.contains("/storage/emulated/0"))
-        assertTrue(masked.contains("<path>"))
+    @Test fun exportedPathsDoNotLeakSpacedOrQuotedFilenameTails() {
+        val records = listOf(
+            "10-02 12:34:56.789 I/mpv: config=/data/user/0/example/개인 설정/비밀 파일.conf ready",
+            "10-02 12:34:56.789 E/mpv: java.io.FileNotFoundException: /storage/emulated/0/가족 여행/서울 사진.mp4 (Permission denied)",
+            "10-02 12:34:56.789 E/mpv: java.io.FileNotFoundException: '/sdcard/가족 여행/서울 사진.mp4'",
+            "10-02 12:34:56.789 E/mpv: java.io.FileNotFoundException: \"/mnt/media_rw/1234-ABCD/가족 여행/서울 사진.mp4\"",
+        )
+        val masked = AppLog.maskPaths(records.joinToString("\n"))
+        for (privatePart in listOf("/data/user", "/storage", "/sdcard", "/mnt", "개인 설정",
+                "비밀 파일", "가족 여행", "서울 사진")) {
+            assertFalse("Export contains $privatePart", masked.contains(privatePart))
+        }
+        assertTrue(masked.contains("10-02 12:34:56.789 E/mpv: java.io.FileNotFoundException:"))
+    }
+
+    @Test fun exportedUrisAndEncodedJsonPathsUseTheSamePrivacyPolicy() {
+        val records = listOf(
+            "I/library: content://private.provider/document/primary%3AMovies%2FSecret%20Holiday.mp4",
+            "E/mpv: java.io.IOException: file:///storage/emulated/0/비밀 여행.mp4",
+            """E/mpv: java.io.IOException: {"path":"%2Fstorage%2Femulated%2F0%2FHidden%20Clip.mp4"}""",
+            """E/mpv: java.io.IOException: {"path":"\/storage\/emulated\/0\/Private Movie.mp4"}""",
+            """E/mpv: java.io.IOException: {"path":"\u002fdata\u002fuser\u002f0\u002fPrivate Cache.mp4"}""",
+            "E/mpv: java.io.IOException: %252Fstorage%252Femulated%252F0%252FNested Secret.mp4",
+        )
+        val masked = AppLog.maskPaths(records.joinToString("\n"))
+        for (privatePart in listOf("private.provider", "Secret", "Holiday", "비밀 여행", "Hidden",
+                "Private Movie", "Private Cache", "Nested Secret", "storage", "emulated")) {
+            assertFalse("Export contains $privatePart", masked.contains(privatePart))
+        }
+        assertTrue(masked.contains("java.io.IOException"))
+    }
+
+    @Test fun exportedTitlesAndShortSafSourceLabelsDoNotExposeMediaNames() {
+        val records = listOf(
+            "I/Player: loading item 2 resume=15s title=가족 여행 최종.mp4",
+            """I/Player: {"filename":"Private Wedding.mkv"}""",
+            """I/Player: {\"title\":\"Encoded%20Wedding.mkv\"}""",
+            "I/Player: display_name='Secret Birthday.mp4'",
+            "I/mpv: open primary:Movies/개인 영상/Hidden Film.mp4 via fd://42",
+            "I/mpv: open 1234-ABCD:Movies/Private Volume.mp4 via real path",
+            "I/mpv: open Private Filename.mp4 via direct file path",
+            "W/mpv: openFileDescriptor failed for Secret Clip.mp4: java.io.FileNotFoundException",
+        )
+        val masked = AppLog.maskPaths(records.joinToString("\n"))
+        for (privatePart in listOf("가족 여행", "Private Wedding", "Encoded%20Wedding", "Secret Birthday", "primary:",
+                "개인 영상", "Hidden Film", "1234-ABCD", "Private Volume", "Private Filename", "Secret Clip")) {
+            assertFalse("Export contains $privatePart", masked.contains(privatePart))
+        }
+        assertTrue(masked.contains("loading item 2 resume=15s title="))
+        assertTrue(masked.contains("openFileDescriptor failed for"))
+        assertTrue(masked.contains("java.io.FileNotFoundException"))
+    }
+
+    @Test fun combinedExportProtectsCrashMessagesAndRecentLogsWithoutLosingDiagnostics() {
+        val report = """
+            MoVo debug report
+            device=Generic Model api=28
+            --- recent log ---
+            10-02 12:34:56.789 I/Player: loading item 1 resume=9s title=Secret Family.mp4
+            --- crash report ---
+            MoVo crash report
+            java.lang.IllegalStateException: cannot read content://private.provider/document/primary:Movies/Secret Crash.mp4
+                at com.example.Player.load(Player.kt:42)
+            Caused by: java.io.FileNotFoundException: /storage/emulated/0/개인 폴더/비밀 영상.mp4
+            --- recent log ---
+            W/mpv: cacheCopy failed for primary:Movies/Hidden Subtitle.srt: java.io.IOException
+        """.trimIndent()
+        val masked = AppLog.maskPaths(report)
+        for (privatePart in listOf("Secret Family", "private.provider", "Secret Crash", "/storage",
+                "개인 폴더", "비밀 영상", "primary:", "Hidden Subtitle")) {
+            assertFalse("Combined export contains $privatePart", masked.contains(privatePart))
+        }
+        for (diagnostic in listOf("device=Generic Model api=28", "10-02 12:34:56.789",
+                "java.lang.IllegalStateException", "java.io.FileNotFoundException", "java.io.IOException",
+                "at com.example.Player.load(Player.kt:42)")) {
+            assertTrue("Lost diagnostic $diagnostic", masked.contains(diagnostic))
+        }
     }
 
     @Test fun videoAlignEnumMappings() {
@@ -249,5 +359,19 @@ class StateLogicTest {
         assertTrue(SettingsRepo.validateSpeedStep("-0.05").isFailure)
         assertTrue(SettingsRepo.validateSpeedStep("abc").isFailure)
         assertTrue(SettingsRepo.validateSpeedStep("0.025").isFailure)
+    }
+    @Test fun onlyCurrentEntryEofCanAdvanceOrRepeat() {
+        val id = 9_007_199_254_740_993L
+        assertEquals(PlaybackEndAction.ADVANCE, playbackEndAction(0, 0, id, id, false, true))
+        assertEquals(PlaybackEndAction.REPEAT, playbackEndAction(0, 0, id, id, true, true))
+        assertEquals(PlaybackEndAction.PAUSE, playbackEndAction(0, 0, id, id, false, false))
+        for (reason in listOf(2, 3, 5)) {
+            assertEquals(PlaybackEndAction.IGNORE, playbackEndAction(reason, 0, id, id, true, true))
+        }
+        assertEquals(PlaybackEndAction.ERROR, playbackEndAction(4, -13, id, id, true, true))
+        assertEquals(PlaybackEndAction.ERROR, playbackEndAction(0, -13, id, id, true, true))
+        assertEquals(PlaybackEndAction.IGNORE, playbackEndAction(0, 0, id, id + 1, true, true))
+        assertEquals(PlaybackEndAction.IGNORE, playbackEndAction(4, -13, id, id + 1, true, true))
+        assertEquals(PlaybackEndAction.IGNORE, playbackEndAction(0, 0, id, null, true, true))
     }
 }

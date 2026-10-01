@@ -20,6 +20,9 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.LazyItemScope
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
@@ -46,6 +49,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -56,9 +64,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import com.example.mpvlibrary.data.*
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.*
@@ -95,7 +103,11 @@ sealed interface Screen {
 @Composable
 fun AppRoot() {
     val context = LocalContext.current
-    val scanner = remember { LibraryScanner(context) }
+    val applicationContext = context.applicationContext
+    val scanner = remember { LibraryScanner(applicationContext) }
+    val deleteState = remember {
+        SafeDeleteState(applicationContext, AppDb.get(applicationContext), scanner)
+    }
     var screen by remember { mutableStateOf<Screen>(Screen.Library) }
 
     LaunchedEffect(Unit) {
@@ -164,12 +176,16 @@ fun AppRoot() {
         }
     }
 
+    SafeDeleteDialogs(deleteState)
+
     when (val s = screen) {
         is Screen.Library -> LibraryScreen(
             onSettings = { screen = Screen.Settings },
+            deleteState = deleteState,
         )
         is Screen.Folder -> FolderScreen(
             folderId = s.folderId, path = s.path,
+            deleteState = deleteState,
             onPath = { screen = Screen.Folder(s.folderId, it) },
             onBack = {
                 screen = when {
@@ -179,6 +195,7 @@ fun AppRoot() {
                 }
             },
             onSettings = { screen = Screen.Settings },
+            onFolderDeleted = { screen = Screen.Library },
         )
         is Screen.Settings -> SettingsScreen(onBack = { screen = Screen.Library })
     }
@@ -278,7 +295,7 @@ fun SidebarItem(
     @Composable
     fun itemContent() {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            modifier = Modifier.sizeIn(minHeight = 48.dp).padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             CompositionLocalProvider(LocalContentColor provides fg) {
@@ -322,14 +339,16 @@ fun SidebarItem(
 @Composable
 fun LibraryScreen(
     onSettings: () -> Unit,
+    deleteState: SafeDeleteState,
 ) {
     val context = LocalContext.current
     val db = remember { AppDb.get(context) }
-    val scanner = remember { LibraryScanner(context) }
+    val scanner = remember { LibraryScanner(context.applicationContext) }
     val scope = rememberCoroutineScope()
 
     var folders by remember { mutableStateOf<List<FolderEntity>>(emptyList()) }
     var recent by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
+    val scanStatuses by LibraryScanner.statuses.collectAsState()
     var threshold by remember { mutableStateOf(0.9) }
     var thumbScale by remember { mutableStateOf("medium") }
     var continuePlaylistMode by remember { mutableStateOf(SettingsRepo.DEFAULT_CONTINUE_PLAYLIST) }
@@ -376,16 +395,9 @@ fun LibraryScreen(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         if (uri != null) {
-            LibraryScanner.takePermission(context, uri)
-            scope.launch(Dispatchers.IO) {
-                db.folders().insert(
-                    FolderEntity(
-                        treeUri = uri.toString(),
-                        displayName = LibraryScanner.displayName(context, uri),
-                        addedAt = System.currentTimeMillis(),
-                    ),
-                )
-                scanner.scanAll()
+            LibraryWork.scope.launch {
+                val folder = scanner.register(uri)
+                scanner.scan(folder)
             }
         }
     }
@@ -415,12 +427,8 @@ fun LibraryScreen(
         }
     }
 
-    val continueDeleteState = remember(context, scope, db, scanner) {
-        SafeDeleteState(context, scope, db, scanner)
-    }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        SafeDeleteDialogs(continueDeleteState)
 
         val isWide = maxWidth >= 600.dp
 
@@ -479,17 +487,28 @@ fun LibraryScreen(
                         items(folders, key = { it.id }) { f ->
                             val selected = selection is HomeSelection.Folder &&
                                 (selection as HomeSelection.Folder).folderId == f.id
-                            SidebarItem(
-                                icon = { Icon(Icons.Default.Folder, null) },
-                                label = f.displayName,
-                                badge = null,
-                                selected = selected,
-                                onClick = {
-                                    folderPath = ""
-                                    selection = HomeSelection.Folder(f.id, "")
-                                },
-                                onLongClick = { requestFolderUnregister(f) },
-                            )
+                            val status = scanStatuses[f.id]
+                            Column {
+                                SidebarItem(
+                                    icon = { Icon(Icons.Default.Folder, null) },
+                                    label = f.displayName,
+                                    badge = null,
+                                    selected = selected,
+                                    onClick = {
+                                        folderPath = ""
+                                        selection = HomeSelection.Folder(f.id, "")
+                                    },
+                                    onLongClick = { requestFolderUnregister(f) },
+                                )
+                                if (status?.running == true) {
+                                    LinearProgressIndicator(Modifier.fillMaxWidth().padding(horizontal = 16.dp))
+                                } else if (status?.error != null) {
+                                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Text("스캔 실패", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+                                        TextButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scan(f) } }) { Text("재시도") }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -529,7 +548,7 @@ fun LibraryScreen(
                                     threshold = threshold,
                                     onPlay = playContinueVideo,
                                     onRefresh = { scanner.scanAll() },
-                                    deleteState = continueDeleteState,
+                                    deleteState = deleteState,
                                     modifier = Modifier.padding(pad),
                                     thumbSize = when (thumbScale) {
                                         "small" -> 88.dp
@@ -544,6 +563,7 @@ fun LibraryScreen(
                                 FolderScreen(
                                     folderId = sel.folderId,
                                     path = folderPath,
+                                    deleteState = deleteState,
                                     onPath = { folderPath = it },
                                     onBack = if (folderPath.isNotEmpty()) {
                                         {
@@ -664,7 +684,7 @@ fun LibraryScreen(
                                 threshold = threshold,
                                 onPlay = playContinueVideo,
                                 onRefresh = { scanner.scanAll() },
-                                deleteState = continueDeleteState,
+                                deleteState = deleteState,
                                 thumbSize = when (thumbScale) {
                                     "small" -> 88.dp
                                     "large" -> 148.dp
@@ -676,6 +696,7 @@ fun LibraryScreen(
                                     FolderScreen(
                                         folderId = s.folderId,
                                         path = folderPath,
+                                        deleteState = deleteState,
                                         onPath = { folderPath = it },
                                         onBack = null,
                                         onSettings = onSettings,
@@ -703,19 +724,8 @@ fun LibraryScreen(
             confirmButton = {
                 TextButton(onClick = {
                     unregisterTarget = null
-                    scope.launch(Dispatchers.IO) {
-                        val f = db.folders().byId(target.id)
-                        db.folders().delete(target.id)
-                        db.videos().deleteForFolder(target.id)
-                        f?.let { runCatching { LibraryScanner.releasePermission(context, Uri.parse(it.treeUri)) } }
-                        kotlinx.coroutines.withContext(Dispatchers.Main) {
-                            if (selection is HomeSelection.Folder &&
-                                (selection as HomeSelection.Folder).folderId == target.id
-                            ) {
-                                selection = HomeSelection.ContinueWatching
-                                folderPath = ""
-                            }
-                        }
+                    LibraryWork.scope.launch {
+                        scanner.unregister(target)
                     }
                 }) { Text("해제", color = MaterialTheme.colorScheme.error) }
             },
@@ -733,19 +743,23 @@ fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(onClickLabel = "${v.name} 재생", role = Role.Button, onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                contentDescription = videoAnnouncement(v)
+                stateDescription = videoPlaybackState(v, threshold)
+            }
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Thumb(
-            uri = v.uri,
+            video = v,
             modifier = Modifier
                 .size(116.dp, 66.dp)
                 .clip(RoundedCornerShape(8.dp)),
             isWatched = watched,
         )
         Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).clearAndSetSemantics { }) {
             Text(
                 v.name,
                 maxLines = 2,
@@ -774,41 +788,58 @@ fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
     }
 }
 
+data class DeleteTarget(val video: VideoEntity, val parentPath: String)
+
 class SafeDeleteState(
-    val context: Context,
-    val scope: CoroutineScope,
-    val db: AppDb,
-    val scanner: LibraryScanner,
-    val onDeleteSuccess: (List<String>) -> Unit = {},
+    context: Context,
+    private val db: AppDb,
+    private val scanner: LibraryScanner,
 ) {
+    private val context = context.applicationContext
+    var onDeleteSuccess: ((List<String>) -> Unit)? = null
     var showDeleteDialog by mutableStateOf(false)
-    var deleteTargetUris by mutableStateOf<List<String>>(emptyList())
-    var pendingDeleteUris by mutableStateOf<List<String>>(emptyList())
+    var deleteTargets by mutableStateOf<List<DeleteTarget>>(emptyList())
+    var pendingDeleteTargets by mutableStateOf<List<DeleteTarget>>(emptyList())
     var showPermissionLostDialog by mutableStateOf(false)
     var reauthTarget by mutableStateOf<FolderEntity?>(null)
 
-    fun requestDelete(uris: List<String>) {
-        if (uris.isEmpty()) return
-        deleteTargetUris = uris
-        showDeleteDialog = true
+    fun requestDelete(videos: List<VideoEntity>) {
+        val snapshots = videos.distinctBy { it.uri }
+        if (snapshots.isEmpty()) return
+        LibraryWork.scope.launch {
+            val folderNames = snapshots.map { it.folderId }.distinct().associateWith {
+                db.folders().byId(it)?.displayName ?: "등록 폴더"
+            }
+            val targets = snapshots.map { video ->
+                DeleteTarget(video, "${folderNames.getValue(video.folderId)}/${video.dirPath}".trimEnd('/') + "/")
+            }
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                deleteTargets = targets
+                showDeleteDialog = true
+            }
+        }
     }
 
     fun executeConfirmedDelete() {
-        val targets = deleteTargetUris
+        val snapshots = deleteTargets.toList()
+        val targets = snapshots.map { it.video.uri }
+        if (targets.isEmpty()) return
         showDeleteDialog = false
-        deleteTargetUris = emptyList()
+        deleteTargets = emptyList()
 
-        scope.launch(Dispatchers.IO) {
-            val entities = targets.mapNotNull { db.videos().byUri(it) }
+        LibraryWork.scope.launch {
+            val entities = snapshots.map { it.video }
             val folderIds = entities.map { it.folderId }.distinct()
             val folders = folderIds.mapNotNull { db.folders().byId(it) }
+            val foldersById = folders.associateBy { it.id }
+            val entitiesByUri = entities.associateBy { it.uri }
 
             // Check if any folder lost write permission
             for (f in folders) {
                 val treeUri = runCatching { Uri.parse(f.treeUri) }.getOrNull()
                 if (treeUri == null || !LibraryScanner.hasPersistedPermission(context, treeUri, write = true)) {
-                    pendingDeleteUris = targets
                     kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        pendingDeleteTargets = snapshots
                         reauthTarget = f
                         showPermissionLostDialog = true
                     }
@@ -821,10 +852,10 @@ class SafeDeleteState(
             val failedUris = mutableListOf<String>()
             val securityDeniedUris = mutableSetOf<String>()
 
-            for (u in targets) {
+            for (entity in entities) {
+                val u = entity.uri
                 val parsed = Uri.parse(u)
-                val entity = db.videos().byUri(u)
-                val f = entity?.let { db.folders().byId(it.folderId) }
+                val f = foldersById[entity.folderId]
                 if (f != null) {
                     runCatching { LibraryScanner.takePermission(context, Uri.parse(f.treeUri)) }
                 }
@@ -853,7 +884,7 @@ class SafeDeleteState(
                     val treeRes = runCatching {
                         if (f != null) {
                             val root = DocumentFile.fromTreeUri(context, Uri.parse(f.treeUri))
-                            if (entity != null && root != null) {
+                            if (root != null) {
                                 var dir: DocumentFile? = root
                                 if (entity.dirPath.isNotEmpty()) {
                                     for (seg in entity.dirPath.split('/')) {
@@ -886,21 +917,21 @@ class SafeDeleteState(
             if (successfullyDeleted.isNotEmpty()) {
                 db.videos().deleteByUris(successfullyDeleted)
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
-                    onDeleteSuccess(successfullyDeleted)
+                    onDeleteSuccess?.invoke(successfullyDeleted)
                 }
             }
 
             if (failedCount > 0) {
                 val lostFolder = failedUris.firstNotNullOfOrNull { u ->
-                    val v = db.videos().byUri(u)
-                    v?.let { db.folders().byId(it.folderId) }?.takeIf { f ->
+                    val v = entitiesByUri.getValue(u)
+                    foldersById[v.folderId]?.takeIf { f ->
                         val t = runCatching { Uri.parse(f.treeUri) }.getOrNull()
                         (u in securityDeniedUris) || t == null || !LibraryScanner.hasPersistedPermission(context, t, write = true)
                     }
                 }
                 if (lostFolder != null) {
-                    pendingDeleteUris = failedUris
                     kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        pendingDeleteTargets = snapshots.filter { it.video.uri in failedUris }
                         reauthTarget = lostFolder
                         showPermissionLostDialog = true
                     }
@@ -928,7 +959,7 @@ class SafeDeleteState(
     fun handlePickerResult(uri: Uri?) {
         AppLog.i("library", "reauth picker result: ${uri != null}")
         if (uri == null) {
-            pendingDeleteUris = emptyList()
+            pendingDeleteTargets = emptyList()
             reauthTarget = null
             return
         }
@@ -958,14 +989,14 @@ class SafeDeleteState(
             "reauth grant persisted=" +
                 LibraryScanner.hasPersistedPermission(context, uri, write = true),
         )
-        scope.launch(Dispatchers.IO) {
+        val retry = pendingDeleteTargets.toList()
+        pendingDeleteTargets = emptyList()
+        LibraryWork.scope.launch {
             scanner.scan(target)
-            val retry = pendingDeleteUris
-            pendingDeleteUris = emptyList()
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 reauthTarget = null
                 if (retry.isNotEmpty()) {
-                    deleteTargetUris = retry
+                    deleteTargets = retry
                     showDeleteDialog = true
                 }
             }
@@ -981,18 +1012,33 @@ fun SafeDeleteDialogs(state: SafeDeleteState) {
         state.handlePickerResult(uri)
     }
 
-    if (state.showDeleteDialog && state.deleteTargetUris.isNotEmpty()) {
+    if (state.showDeleteDialog && state.deleteTargets.isNotEmpty()) {
         AlertDialog(
             onDismissRequest = {
                 state.showDeleteDialog = false
-                state.deleteTargetUris = emptyList()
+                state.deleteTargets = emptyList()
             },
             title = { Text("동영상 삭제") },
             text = {
-                Column {
-                    Text(
-                        "${state.deleteTargetUris.size}개의 동영상을 라이브러리 및 저장공간에서 완전히 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
-                    )
+                LazyColumn(
+                    Modifier.fillMaxWidth().heightIn(max = 320.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    item(key = "warning") {
+                        Text(
+                            "${state.deleteTargets.size}개의 동영상을 라이브러리 및 저장공간에서 완전히 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.",
+                        )
+                    }
+                    items(state.deleteTargets, key = { it.video.uri }) { target ->
+                        Column {
+                            Text(target.video.name, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                target.parentPath,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -1006,7 +1052,7 @@ fun SafeDeleteDialogs(state: SafeDeleteState) {
             dismissButton = {
                 TextButton(onClick = {
                     state.showDeleteDialog = false
-                    state.deleteTargetUris = emptyList()
+                    state.deleteTargets = emptyList()
                 }) {
                     Text("취소")
                 }
@@ -1021,6 +1067,7 @@ fun SafeDeleteDialogs(state: SafeDeleteState) {
             onDismissRequest = {
                 state.showPermissionLostDialog = false
                 state.reauthTarget = null
+                state.pendingDeleteTargets = emptyList()
             },
             icon = { Icon(Icons.Default.FolderShared, null, tint = MaterialTheme.colorScheme.primary) },
             title = { Text("폴더 접근 권한 필요") },
@@ -1046,6 +1093,7 @@ fun SafeDeleteDialogs(state: SafeDeleteState) {
                 TextButton(onClick = {
                     state.showPermissionLostDialog = false
                     state.reauthTarget = null
+                    state.pendingDeleteTargets = emptyList()
                 }) {
                     Text("취소")
                 }
@@ -1067,11 +1115,30 @@ fun ContinueWatchingPane(
     val context = LocalContext.current
     val db = remember { AppDb.get(context) }
     val scope = rememberCoroutineScope()
+    val scanStatuses by LibraryScanner.statuses.collectAsState()
+    val registeredFolders by remember(db) { db.folders().observeAll() }.collectAsState(initial = emptyList())
+    val failedFolders = remember(registeredFolders, scanStatuses) {
+        registeredFolders.filter { scanStatuses[it.id]?.error != null }
+    }
 
     PullRefreshWrapper(
         modifier = modifier.fillMaxSize(),
         onRefresh = onRefresh,
     ) {
+        Column(Modifier.fillMaxSize()) {
+            if (failedFolders.isNotEmpty()) {
+                Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "${failedFolders.size}개 폴더 스캔 실패. 기존 목록과 시청 기록은 유지됩니다.",
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        TextButton(onClick = { scope.launch { onRefresh() } }) { Text("재시도") }
+                    }
+                }
+            }
+            Box(Modifier.weight(1f)) {
         if (videos.isEmpty()) {
             Box(
                 Modifier
@@ -1104,11 +1171,13 @@ fun ContinueWatchingPane(
                             }
                         },
                         onActionDelete = {
-                            deleteState.requestDelete(listOf(v.uri))
+                            deleteState.requestDelete(listOf(v))
                         },
                     )
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                 }
+            }
+        }
             }
         }
     }
@@ -1124,12 +1193,13 @@ fun FolderScreen(
     onPath: (String) -> Unit,
     onBack: (() -> Unit)?,
     onSettings: () -> Unit,
+    deleteState: SafeDeleteState,
     showTopBar: Boolean = true,
     onFolderDeleted: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val db = remember { AppDb.get(context) }
-    val scanner = remember { LibraryScanner(context) }
+    val scanner = remember { LibraryScanner(context.applicationContext) }
     val scope = rememberCoroutineScope()
     var folder by remember { mutableStateOf<FolderEntity?>(null) }
     var videos by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
@@ -1137,22 +1207,28 @@ fun FolderScreen(
     var query by remember { mutableStateOf("") }
     var sortByName by remember { mutableStateOf(true) }
     var unseenOnly by remember { mutableStateOf(false) }
+    val scanStatus by LibraryScanner.statuses.collectAsState()
     var thumbScale by remember { mutableStateOf("medium") }
 
     // Multi-selection state for library file management
     var selectedUris by remember { mutableStateOf(setOf<String>()) }
     val inSelectionMode = selectedUris.isNotEmpty()
     var treeWriteLost by remember { mutableStateOf(false) }
-    val deleteState = remember(context, scope, db, scanner) {
-        SafeDeleteState(
-            context = context,
-            scope = scope,
-            db = db,
-            scanner = scanner,
-            onDeleteSuccess = { deleted ->
-                selectedUris = selectedUris - deleted.toSet()
-            },
-        )
+    val deleteSuccessCallback: (List<String>) -> Unit = remember {
+        { deleted -> selectedUris = selectedUris - deleted.toSet() }
+    }
+    DisposableEffect(deleteState, deleteSuccessCallback) {
+        deleteState.onDeleteSuccess = deleteSuccessCallback
+        onDispose {
+            if (deleteState.onDeleteSuccess === deleteSuccessCallback) {
+                deleteState.onDeleteSuccess = null
+            }
+        }
+    }
+    val folderDeletedCallback = remember { mutableStateOf<(() -> Unit)?>(null) }
+    SideEffect { folderDeletedCallback.value = onFolderDeleted }
+    DisposableEffect(Unit) {
+        onDispose { folderDeletedCallback.value = null }
     }
 
     BackHandler(enabled = inSelectionMode) {
@@ -1171,10 +1247,11 @@ fun FolderScreen(
     val title = folder?.displayName ?: "…"
     val crumbs = if (path.isEmpty()) listOf(title) else listOf(title) + path.split('/')
 
-    val subDirs = remember(videos, path) {
+    val videosByDir = remember(videos) { videos.groupBy { it.dirPath } }
+    val naturalNameKeys = remember(videos) { videos.associate { it.uri to naturalKey(it.name) } }
+    val subDirs = remember(videosByDir, path) {
         val prefix = if (path.isEmpty()) "" else "$path/"
-        videos.asSequence()
-            .map { it.dirPath }
+        videosByDir.keys.asSequence()
             .filter { it.startsWith(prefix) && it != path }
             .map { it.removePrefix(prefix).substringBefore('/') }
             .filter { it.isNotEmpty() }
@@ -1182,15 +1259,15 @@ fun FolderScreen(
             .sorted()
             .toList()
     }
-    val here = remember(videos, path, query, unseenOnly, sortByName) {
-        videos.asSequence()
-            .filter { it.dirPath == path }
-            .filter { query.isBlank() || it.name.contains(query, ignoreCase = true) }
-            .filter { !unseenOnly || (it.positionSec == 0.0) }
-            .sortedWith(if (sortByName) compareBy { naturalKey(it.name) } else compareByDescending { it.lastPlayedAt })
-            .toList()
+    val here = remember(videosByDir, naturalNameKeys, path, query, unseenOnly, sortByName) {
+        val filtered = videosByDir[path].orEmpty().filter {
+            (query.isBlank() || it.name.contains(query, ignoreCase = true)) &&
+                (!unseenOnly || it.positionSec == 0.0)
+        }
+        if (sortByName) filtered.sortedBy { naturalNameKeys.getValue(it.uri) }
+        else filtered.sortedByDescending { it.lastPlayedAt }
     }
-    val allUris = here.map { it.uri }
+    val allUris = remember(here) { here.map { it.uri } }
 
     val toggleSelect = { uri: String ->
         selectedUris = if (selectedUris.contains(uri)) selectedUris - uri else selectedUris + uri
@@ -1208,6 +1285,20 @@ fun FolderScreen(
 
     val folderContent: @Composable (Modifier) -> Unit = { modifier ->
         Column(modifier.fillMaxSize()) {
+            val status = scanStatus[folderId]
+            if (status?.running == true) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            } else if (status?.error != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("폴더 스캔 실패. 기존 영상 목록은 유지됩니다.", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                        TextButton(onClick = { scope.launch(Dispatchers.IO) { folder?.let { scanner.scan(it) } } }) { Text("재시도") }
+                    }
+                }
+            }
             if (treeWriteLost) {
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
@@ -1226,7 +1317,7 @@ fun FolderScreen(
                             modifier = Modifier.weight(1f),
                         )
                         TextButton(onClick = {
-                            deleteState.pendingDeleteUris = emptyList()
+                            deleteState.pendingDeleteTargets = emptyList()
                             deleteState.reauthTarget = folder
                             deleteState.showPermissionLostDialog = true
                         }) { Text("권한 다시 허용") }
@@ -1267,7 +1358,7 @@ fun FolderScreen(
                             Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
                         }
                         IconButton(onClick = {
-                            deleteState.requestDelete(selectedUris.toList())
+                            deleteState.requestDelete(videos.filter { it.uri in selectedUris })
                         }) {
                             Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
                         }
@@ -1319,6 +1410,7 @@ fun FolderScreen(
                                 Modifier
                                     .fillMaxWidth()
                                     .clickable { onPath(if (path.isEmpty()) d else "$path/$d") }
+                                    .sizeIn(minHeight = 48.dp)
                                     .padding(horizontal = 16.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
@@ -1360,7 +1452,7 @@ fun FolderScreen(
                                     scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
                                 },
                                 onActionDelete = {
-                                    deleteState.requestDelete(listOf(v.uri))
+                                    deleteState.requestDelete(listOf(v))
                                 },
                             )
                             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
@@ -1403,7 +1495,7 @@ fun FolderScreen(
                                 Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
                             }
                             IconButton(onClick = {
-                                deleteState.requestDelete(selectedUris.toList())
+                                deleteState.requestDelete(videos.filter { it.uri in selectedUris })
                             }) {
                                 Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
                             }
@@ -1451,7 +1543,7 @@ fun FolderScreen(
                                         text = { Text("선택 삭제", color = MaterialTheme.colorScheme.error) },
                                         leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
                                         onClick = {
-                                            deleteState.requestDelete(selectedUris.toList())
+                                            deleteState.requestDelete(videos.filter { it.uri in selectedUris })
                                             showBatchMenu = false
                                         },
                                     )
@@ -1492,12 +1584,11 @@ fun FolderScreen(
                                     confirmButton = {
                                         TextButton(onClick = {
                                             showUnregisterDialog = false
-                                            scope.launch(Dispatchers.IO) {
-                                                val f = db.folders().byId(folderId)
-                                                db.folders().delete(folderId)
-                                                db.videos().deleteForFolder(folderId)
-                                                f?.let { runCatching { LibraryScanner.releasePermission(context, Uri.parse(it.treeUri)) } }
-                                                kotlinx.coroutines.withContext(Dispatchers.Main) { onFolderDeleted() }
+                                            LibraryWork.scope.launch {
+                                                db.folders().byId(folderId)?.let { scanner.unregister(it) }
+                                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                                    folderDeletedCallback.value?.invoke()
+                                                }
                                             }
                                         }) { Text("해제", color = MaterialTheme.colorScheme.error) }
                                     },
@@ -1518,7 +1609,6 @@ fun FolderScreen(
         folderContent(Modifier)
     }
 
-    SafeDeleteDialogs(deleteState)
 
 }
 
@@ -1578,7 +1668,7 @@ fun VideoRow(
                 if (isEndToStart) {
                     Icon(
                         Icons.Default.Delete,
-                        contentDescription = "삭제",
+                        contentDescription = null,
                         tint = MaterialTheme.colorScheme.onError,
                     )
                 }
@@ -1589,14 +1679,25 @@ fun VideoRow(
             Modifier
                 .fillMaxWidth()
                 .background(MaterialTheme.colorScheme.surface)
-                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .combinedClickable(
+                    role = Role.Button,
+                    onClickLabel = if (inSelectionMode) "${v.name} 선택 변경" else "${v.name} 재생",
+                    onLongClickLabel = "${v.name} 길게 누르기",
+                    onClick = onClick,
+                    onLongClick = onLongClick,
+                )
+                .semantics(mergeDescendants = true) {
+                    contentDescription = videoAnnouncement(v)
+                    stateDescription = videoPlaybackState(v, threshold)
+                    selected = isSelected
+                }
                 .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
         // Thumbnail: green top-end badge = watched, blue top-start badge = long-press selected.
         Thumb(
-            uri = v.uri,
+            video = v,
             modifier = Modifier
                 .size(thumbWidth, (thumbWidth.value * 9f / 16f).dp)
                 .clip(RoundedCornerShape(8.dp)),
@@ -1607,7 +1708,7 @@ fun VideoRow(
         Spacer(Modifier.width(12.dp))
 
         // Expanded text column — NO 1-line truncation, rich metadata
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f).clearAndSetSemantics { }) {
             Text(
                 v.name,
                 style = MaterialTheme.typography.titleMedium,
@@ -1693,26 +1794,31 @@ fun VideoRow(
 
         // Right side: file context menu only (selection is long-press only).
         Box {
-            IconButton(onClick = { showMenu = true }, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Default.MoreVert, "더보기", tint = Color.Gray)
+            IconButton(onClick = { showMenu = true }, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Default.MoreVert, "${v.name} 작업 더보기", tint = Color.Gray)
             }
             DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                 DropdownMenuItem(
-                    text = { Text(if (watched) "미시청으로 표시" else "시청 완료로 표시") },
+                    text = { Text(if (watched) "미시청으로 표시" else "시청 완료로 표시", modifier = Modifier.clearAndSetSemantics { }) },
                     onClick = { onActionWatched(); showMenu = false },
                     leadingIcon = { Icon(if (watched) Icons.Default.RemoveDone else Icons.Default.CheckCircle, null) },
+                    modifier = Modifier.semantics {
+                        contentDescription = "${v.name} ${if (watched) "미시청으로 표시" else "시청 완료로 표시"}"
+                    },
                 )
                 DropdownMenuItem(
-                    text = { Text("재생 기록 초기화") },
+                    text = { Text("재생 기록 초기화", modifier = Modifier.clearAndSetSemantics { }) },
                     onClick = { onActionReset(); showMenu = false },
                     leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
+                    modifier = Modifier.semantics { contentDescription = "${v.name} 재생 기록 초기화" },
                 )
                 if (onActionDelete != null) {
                     HorizontalDivider()
                     DropdownMenuItem(
-                        text = { Text("삭제", color = MaterialTheme.colorScheme.error) },
+                        text = { Text("삭제", color = MaterialTheme.colorScheme.error, modifier = Modifier.clearAndSetSemantics { }) },
                         onClick = { onActionDelete(); showMenu = false },
                         leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                        modifier = Modifier.semantics { contentDescription = "${v.name} 삭제" },
                     )
                 }
             }
@@ -1723,11 +1829,29 @@ fun VideoRow(
 
 // ---------------------------------------------------------------- Settings
 
+private enum class SettingsCategory(val label: String) {
+    Playback("재생"),
+    Library("라이브러리"),
+    Advanced("고급·로그"),
+}
+
+private fun LazyListScope.categoryItem(
+    category: SettingsCategory,
+    selectedCategory: SettingsCategory,
+    key: String,
+    content: @Composable LazyItemScope.() -> Unit,
+) {
+    if (category == selectedCategory) item(key = key, content = content)
+}
+
 @Composable
 fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val settings = remember { SettingsRepo(context) }
     val scope = rememberCoroutineScope()
+    var category by remember { mutableStateOf(SettingsCategory.Playback) }
+    val listState = rememberLazyListState()
+    LaunchedEffect(category) { listState.scrollToItem(0) }
 
     var defaultSpeed by remember { mutableStateOf(1.0) }
     var speedPresets by remember { mutableStateOf<List<Double>>(SettingsRepo.DEFAULT_SPEED_PRESETS) }
@@ -1788,16 +1912,30 @@ fun SettingsScreen(onBack: () -> Unit) {
     }
 
     AppScaffold(title = "설정", onBack = onBack) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            SettingsCategory.entries.forEach { option ->
+                FilterChip(
+                    selected = category == option,
+                    onClick = { category = option },
+                    label = { Text(option.label) },
+                )
+            }
+        }
         LazyColumn(
             Modifier
                 .weight(1f)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
+            state = listState,
         ) {
             item { Spacer(Modifier.height(4.dp)) }
 
             // 1. 재생 속도 프리셋 커스텀 관리
-            item {
+            categoryItem(SettingsCategory.Playback, category, "speed-presets") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -1807,7 +1945,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Speed, null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(Modifier.width(8.dp))
-                            Text("재생 속도 목록 (프리셋)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text("재생 속도 목록 (프리셋)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         }
                         Text(
                             "플레이어에 노출될 배속 버튼 목록을 추가하거나 삭제할 수 있습니다. (클릭 시 기본 배속으로 지정)",
@@ -1832,7 +1970,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                     },
                                     label = {
                                         Text(
-                                            (if (s % 1.0 == 0.0) "${s.toInt()}x" else "${s}x") + if (isDefault) " (기본)" else "",
+                                            SettingsRepo.formatSpeed(s) + if (isDefault) " (기본)" else "",
                                             fontWeight = if (isDefault) FontWeight.Bold else FontWeight.Normal,
                                         )
                                     },
@@ -1897,15 +2035,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                             Text(speedInputError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 4.dp, top = 2.dp))
                         }
 
-                        Row(
+                        FlowRow(
                             Modifier.fillMaxWidth().padding(top = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             OutlinedButton(
                                 onClick = {
                                     bulkPresetsInput = speedPresets.joinToString(", ") {
-                                        if (it % 1.0 == 0.0) it.toInt().toString() else "%.2f".format(Locale.US, it).trimEnd('0').trimEnd('.')
+                                        SettingsRepo.formatSpeed(it).removeSuffix("x")
                                     }
                                     bulkPresetsError = null
                                     showBulkPresetsDialog = true
@@ -1932,7 +2069,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             // 2. 배속 조절 최소 단위 (Step)
-            item {
+            categoryItem(SettingsCategory.Playback, category, "speed-step") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -1942,16 +2079,16 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Tune, null, tint = MaterialTheme.colorScheme.primary)
                             Spacer(Modifier.width(8.dp))
-                            Text("배속 조절 최소 단위 (Step)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                            Text("배속 조절 최소 단위 (Step)", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         }
                         Text(
-                            "플레이어에서 배속을 미세 조절할 때 증감할 최소 단위입니다. (0.01 ~ 1.0, 기본값: 0.05)",
+                            "플레이어에서 배속을 미세 조절할 때 증감할 최소 단위입니다. (0.01 ~ 1.0, 기본값: ${SettingsRepo.formatSpeed(SettingsRepo.DEFAULT_SPEED_STEP)})",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.Gray,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                         )
 
-                        Text("현재 단위: $speedStep", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Text("현재 단위: ${SettingsRepo.formatSpeed(speedStep)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(6.dp))
 
                         val commonSteps = listOf(0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5)
@@ -1971,7 +2108,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                     },
                                     label = {
                                         Text(
-                                            "$step" + if (step == SettingsRepo.DEFAULT_SPEED_STEP) " (기본)" else "",
+                                            SettingsRepo.formatSpeed(step) + if (step == SettingsRepo.DEFAULT_SPEED_STEP) " (기본)" else "",
                                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                         )
                                     },
@@ -2047,7 +2184,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 customStepError = null
                                 scope.launch { settings.setSpeedStep(SettingsRepo.DEFAULT_SPEED_STEP) }
                             }) {
-                                Text("기본 단위(0.05)로 복원", fontSize = 12.sp)
+                                Text("기본 단위(${SettingsRepo.formatSpeed(SettingsRepo.DEFAULT_SPEED_STEP)})로 복원", fontSize = 12.sp)
                             }
                         }
                     }
@@ -2055,7 +2192,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             // 3. 이어보기 재생 목록 (플레이리스트 옵션)
-            item {
+            categoryItem(SettingsCategory.Library, category, "continue-playlist") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -2110,7 +2247,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             // 목록형 썸네일 크기 (모든 화면 공통)
-            item {
+            categoryItem(SettingsCategory.Library, category, "thumbnails") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -2151,7 +2288,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             // 2. 영상 화면 세로 정렬 (Natural Language Selector)
-            item {
+            categoryItem(SettingsCategory.Playback, category, "video-alignment") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -2193,7 +2330,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             // 3. 시청 완료 및 자동 재생
-            item {
+            categoryItem(SettingsCategory.Playback, category, "watch-state-auto-advance") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -2234,7 +2371,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             // P0: 제스처 및 재생 편의 설정
-            item {
+            categoryItem(SettingsCategory.Playback, category, "gestures") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -2245,7 +2382,7 @@ fun SettingsScreen(onBack: () -> Unit) {
 
                         Spacer(Modifier.height(12.dp))
                         Text("더블탭 탐색 시간: ${tapSeekSec.toInt()}초", style = MaterialTheme.typography.bodyMedium)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
                             listOf(5.0, 10.0, 15.0, 30.0).forEach { s ->
                                 FilterChip(
                                     selected = tapSeekSec == s,
@@ -2259,7 +2396,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         }
 
                         Spacer(Modifier.height(12.dp))
-                        Text("롱프레스 쾌속 배속: ${fastSpeed}x", style = MaterialTheme.typography.bodyMedium)
+                        Text("롱프레스 쾌속 배속: ${SettingsRepo.formatSpeed(fastSpeed)}", style = MaterialTheme.typography.bodyMedium)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Slider(
                                 value = fastSpeed.toFloat(),
@@ -2307,17 +2444,17 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             // 4. 고급 MPV 설정 (버튼 클릭 시 모달 다이얼로그로만 표시)
-            item {
+            categoryItem(SettingsCategory.Advanced, category, "mpv-options") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 ) {
-                    Row(
+                    Column(
                         Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Column(Modifier.weight(1f)) {
+                        Column {
                             Text("고급 MPV 엔진 설정", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text(
                                 if (mpvOptions.isBlank()) "기본 설정 사용 중" else "사용자 정의 옵션 적용 중",
@@ -2337,7 +2474,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             // 5. 디버그 로그
-            item {
+            categoryItem(SettingsCategory.Advanced, category, "logs") {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
@@ -2347,7 +2484,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Text("디버그 로그", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                         Text(AppLog.info(), style = MaterialTheme.typography.bodySmall, color = Color.Gray, modifier = Modifier.padding(vertical = 4.dp))
                         var logText by remember { mutableStateOf<String?>(null) }
-                        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = { logText = AppLog.tail(200) }) { Text("로그 보기") }
                             OutlinedButton(onClick = {
                                 val i = AppLog.shareIntent(context)
@@ -2433,37 +2570,60 @@ fun SettingsScreen(onBack: () -> Unit) {
     // Modal dialog for advanced MPV config
     if (showMpvDialog) {
         var tempOptions by remember { mutableStateOf(mpvOptions) }
+        var optionWarning by remember { mutableStateOf<String?>(null) }
         AlertDialog(
             onDismissRequest = { showMpvDialog = false },
             title = { Text("고급 MPV 설정 (mpv.conf)") },
             text = {
                 Column {
                     Text(
-                        "libmpv에 전달할 옵션을 key=value 형식으로 한 줄씩 입력하세요.\n예: hwdec=auto, profile=fast\n보안상 config·script·네트워크·저장 경로 옵션은 적용되지 않습니다.",
+                        "libmpv에 전달할 옵션을 key=value 형식으로 한 줄씩 입력하세요.\n예: hwdec=auto, profile=fast\n파일 기록·저장(log-file 포함), 영상·음성 출력 선택(ao/vo), 스크립트·외부 설정·네트워크·외부 파일 경로·앱 관리 옵션은 저장할 수 없습니다. 차단된 줄을 직접 삭제한 뒤 저장하세요.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.Gray,
                         modifier = Modifier.padding(bottom = 8.dp),
                     )
                     OutlinedTextField(
                         value = tempOptions,
-                        onValueChange = { tempOptions = it },
+                        onValueChange = { tempOptions = it; optionWarning = null },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 280.dp),
                         shape = RoundedCornerShape(10.dp),
                         placeholder = { Text("# 추가 옵션 입력") },
                     )
+                    optionWarning?.let { warning ->
+                        Text(
+                            warning,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
                 }
             },
             confirmButton = {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     TextButton(onClick = {
                         tempOptions = ""
-                        mpvOptions = ""
-                        scope.launch { settings.setMpvOptions("") }
+                        optionWarning = null
+                        scope.launch {
+                            val result = settings.setMpvOptions("")
+                            mpvOptions = result.normalizedText
+                        }
                     }) { Text("초기화") }
                     Button(onClick = {
-                        mpvOptions = tempOptions
-                        scope.launch { settings.setMpvOptions(tempOptions) }
-                        showMpvDialog = false
+                        val parsed = SettingsRepo.parseMpvOptions(tempOptions)
+                        if (parsed.rejected.isNotEmpty()) {
+                            optionWarning = parsed.rejectionMessage()
+                        } else {
+                            scope.launch {
+                                val result = settings.setMpvOptions(tempOptions)
+                                if (result.rejected.isNotEmpty()) {
+                                    optionWarning = result.rejectionMessage()
+                                } else {
+                                    mpvOptions = result.normalizedText
+                                    showMpvDialog = false
+                                }
+                            }
+                        }
                     }) { Text("저장") }
                 }
             },
@@ -2541,10 +2701,12 @@ fun SettingsScreen(onBack: () -> Unit) {
 // ---------------------------------------------------------------- helpers
 
 @Composable
-fun Thumb(uri: String, modifier: Modifier, isWatched: Boolean = false, isSelected: Boolean = false) {
+fun Thumb(video: VideoEntity, modifier: Modifier, isWatched: Boolean = false, isSelected: Boolean = false) {
     val context = LocalContext.current
-    var bmp by remember(uri) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(uri) { bmp = Thumbs.get(context, uri) }
+    var bmp by remember(video.uri, video.sizeBytes, video.lastModified) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(video.uri, video.sizeBytes, video.lastModified) {
+        bmp = Thumbs.get(context, video.uri, video.sizeBytes, video.lastModified)
+    }
     Box(modifier.background(Color(0xFF222222)), contentAlignment = Alignment.Center) {
         val b = bmp
         if (b != null) {
@@ -2568,7 +2730,7 @@ fun Thumb(uri: String, modifier: Modifier, isWatched: Boolean = false, isSelecte
                     .size(20.dp),
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Check, "선택됨", tint = Color.White, modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.Check, null, tint = Color.White, modifier = Modifier.size(13.dp))
                 }
             }
         }
@@ -2583,7 +2745,7 @@ fun Thumb(uri: String, modifier: Modifier, isWatched: Boolean = false, isSelecte
                     .size(20.dp),
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Check, "완료", tint = Color.White, modifier = Modifier.size(13.dp))
+                    Icon(Icons.Default.Check, null, tint = Color.White, modifier = Modifier.size(13.dp))
                 }
             }
         }
@@ -2605,6 +2767,23 @@ fun fmtDate(millis: Long): String {
     if (millis <= 0) return ""
     return SimpleDateFormat("yyyy.MM.dd", Locale.getDefault()).format(Date(millis))
 }
+
+private fun videoPlaybackState(video: VideoEntity, threshold: Double): String = when {
+    video.isWatched(threshold) -> "시청 완료"
+    video.isInProgress(threshold) -> "시청 중 ${pct(video.fraction)}"
+    else -> "미시청"
+}
+
+private fun videoAnnouncement(video: VideoEntity): String = buildList {
+    add(video.name)
+    if (video.dirPath.isNotEmpty()) add(video.dirPath)
+    fmtSize(video.sizeBytes).takeIf { it.isNotEmpty() }?.let { add(it) }
+    fmtDate(video.lastModified).takeIf { it.isNotEmpty() }?.let { add(it) }
+    if (video.durationSec > 0) add("${fmtTime(video.positionSec)} / ${fmtTime(video.durationSec)}")
+    if (video.lastPlayedAt > 0) {
+        add("최근 시청: " + SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date(video.lastPlayedAt)))
+    }
+}.joinToString(", ")
 
 /** Zero-pad digit runs so "Ep 2" sorts before "Ep 10". */
 fun naturalKey(name: String): String {
@@ -2645,7 +2824,9 @@ fun buildContinuePlaylist(
         ContinuePlaylistMode.ORIGINAL_FOLDER -> {
             val sameFolderAndDir = folderVideos
                 .filter { it.folderId == target.folderId && it.dirPath == target.dirPath }
-                .sortedBy { naturalKey(it.name) }
+                .map { it to naturalKey(it.name) }
+                .sortedBy { it.second }
+                .map { it.first }
             val uris = sameFolderAndDir.map { it.uri }.ifEmpty { listOf(target.uri) }
             val idx = uris.indexOf(target.uri).coerceAtLeast(0)
             uris to idx

@@ -99,12 +99,28 @@ object MPVLib {
     }
 
     @JvmStatic
-    fun event(eventId: Int) {
+    fun startFile(playlistEntryId: Long) {
         synchronized(observers) {
             for (o in observers)
-                o.event(eventId)
+                o.startFile(playlistEntryId)
         }
     }
+    @JvmStatic
+    fun event(eventId: Int) {
+        synchronized(observers) {
+            for (o in observers) o.event(eventId)
+        }
+    }
+
+
+    @JvmStatic
+    fun endFile(reason: Int, error: Int, playlistEntryId: Long) {
+        synchronized(observers) {
+            for (o in observers)
+                o.endFile(reason, error, playlistEntryId)
+        }
+    }
+
 
     private val log_observers = mutableListOf<LogObserver>()
 
@@ -136,13 +152,14 @@ object MPVLib {
         fun eventProperty(property: String, value: Boolean)
         fun eventProperty(property: String, value: String)
         fun eventProperty(property: String, value: Double)
+        fun startFile(playlistEntryId: Long)
+        fun endFile(reason: Int, error: Int, playlistEntryId: Long)
         fun event(eventId: Int)
     }
 
     interface LogObserver {
         fun logMessage(prefix: String, level: Int, text: String)
     }
-
     object MpvFormat {
         const val MPV_FORMAT_NONE: Int = 0
         const val MPV_FORMAT_STRING: Int = 1
@@ -154,6 +171,14 @@ object MPVLib {
         const val MPV_FORMAT_NODE_ARRAY: Int = 7
         const val MPV_FORMAT_NODE_MAP: Int = 8
         const val MPV_FORMAT_BYTE_ARRAY: Int = 9
+    }
+
+    object MpvEndFile {
+        const val MPV_END_FILE_REASON_EOF = 0
+        const val MPV_END_FILE_REASON_STOP = 2
+        const val MPV_END_FILE_REASON_QUIT = 3
+        const val MPV_END_FILE_REASON_ERROR = 4
+        const val MPV_END_FILE_REASON_REDIRECT = 5
     }
 
     object MpvEvent {

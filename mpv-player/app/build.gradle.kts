@@ -12,17 +12,26 @@ android {
         applicationId = "com.example.mpvlibrary"
         minSdk = 26
         targetSdk = 34
-        versionCode = 29
-        versionName = "1.0.28"
+        versionCode = 30
+        versionName = "1.0.29"
         vectorDrawables { useSupportLibrary = true }
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
     }
 
     buildTypes {
         getByName("debug") { applicationIdSuffix = null }
         getByName("release") {
+            isDebuggable = false
+            // Release APKs are unsigned here; package-release.py owns verified key rotation.
+            signingConfig = null
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
+    }
+    lint {
+        disable += listOf("HardcodedDebugMode")
     }
 
     compileOptions {

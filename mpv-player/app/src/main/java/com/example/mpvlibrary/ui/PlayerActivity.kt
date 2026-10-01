@@ -26,6 +26,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -60,6 +61,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.example.mpvlibrary.data.AppDb
 import com.example.mpvlibrary.data.AppLog
+import com.example.mpvlibrary.data.LibraryWork
 import com.example.mpvlibrary.data.SettingsRepo
 import com.example.mpvlibrary.mpv.MPVPlayerView
 import com.example.mpvlibrary.mpv.MpvPath
@@ -73,7 +75,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
-import java.util.Locale
 
 enum class AspectRatioMode(val title: String, val shortTitle: String) {
     BEST_FIT("기본 맞춤 (Best Fit)", "맞춤"),
@@ -109,6 +110,26 @@ data class TrackItem(
         }
 }
 
+enum class PlaybackEndAction { IGNORE, ERROR, REPEAT, ADVANCE, PAUSE }
+
+fun playbackEndAction(
+    reason: Int,
+    error: Int,
+    endingEntry: Long,
+    activeEntry: Long?,
+    repeat: Boolean,
+    advance: Boolean,
+): PlaybackEndAction {
+    if (activeEntry != endingEntry) return PlaybackEndAction.IGNORE
+    if (reason == MPVLib.MpvEndFile.MPV_END_FILE_REASON_ERROR || error < 0) return PlaybackEndAction.ERROR
+    if (reason != MPVLib.MpvEndFile.MPV_END_FILE_REASON_EOF) return PlaybackEndAction.IGNORE
+    return when {
+        repeat -> PlaybackEndAction.REPEAT
+        advance -> PlaybackEndAction.ADVANCE
+        else -> PlaybackEndAction.PAUSE
+    }
+}
+
 class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObserver {
 
     companion object {
@@ -138,6 +159,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var lastDuration = 0.0
     private var pollJob: Job? = null
     private var initialized = false
+    private var activeEntryId: Long? = null
+    private var loadPending = true
+    private var loadSubmitted = false
+    private var rejectedEntryId: Long? = null
+    @Volatile private var destroyed = false
+    @Volatile private var loadGeneration = 0L
+    private var loadedEntryUri: String? = null
+
 
     // Playback state
     private var position by mutableStateOf(0.0)
@@ -253,6 +282,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
+                var showTitleDialog by remember { mutableStateOf(false) }
                 LaunchedEffect(controlsVisible, isLocked) { updateSystemBars() }
                 // External subtitle file picker launcher
                 val subPicker = rememberLauncherForActivityResult(
@@ -332,8 +362,44 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             enter = fadeIn(),
                             exit = fadeOut(),
                         ) {
-                            ControlsOverlay()
+                            ControlsOverlay(onShowTitle = { showTitleDialog = true })
                         }
+                    }
+
+                    // Same un-inset bounds as the video view, independent of the control column.
+                    // This clickable sibling sits above the gesture layer in hit testing.
+                    if (controlsVisible && !isLocked) {
+                        FilledIconButton(
+                            onClick = { togglePlayPause() },
+                            modifier = Modifier.align(Alignment.Center).size(64.dp),
+                            shape = CircleShape,
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                            ),
+                        ) {
+                            Icon(
+                                if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                if (isPaused) "재생" else "일시정지",
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(36.dp),
+                            )
+                        }
+                    }
+
+                    if (showTitleDialog) {
+                        AlertDialog(
+                            onDismissRequest = { showTitleDialog = false },
+                            title = { Text("영상 제목") },
+                            text = {
+                                Text(
+                                    videoTitle,
+                                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = { showTitleDialog = false }) { Text("닫기") }
+                            },
+                        )
                     }
 
                     // Subtitle Dialog
@@ -437,14 +503,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
             // User raw MPV options (excluding speed & video-align-y which are controlled via dedicated UI)
             val raw = settings.mpvOptionsRaw.first()
-            val blocked = SettingsRepo.blockedOptions(raw)
-            if (blocked.isNotEmpty()) AppLog.w(TAG, "mpv options blocked for safety: ${blocked.distinct().take(10).joinToString(",")}")
-            for ((k, v) in SettingsRepo.parseOptions(raw)) {
+            val parsed = SettingsRepo.parseMpvOptions(raw)
+            if (parsed.rejected.isNotEmpty()) {
+                fail("일부 고급 MPV 옵션을 적용하지 않았습니다. 설정에서 차단된 줄을 삭제해 주세요.\n${parsed.rejectionMessage()}")
+            }
+            for ((k, v) in parsed.options) {
                 if (k == "speed" || k == "video-align-y") continue
-                mpv("mpv 옵션 $k=$v") {
+                mpv("mpv 옵션 $k") {
                     val r = MPVLib.setOptionString(k, v)
-                    if (r < 0) AppLog.w(TAG, "mpv option rejected: $k=$v")
-                    else AppLog.i(TAG, "mpv option applied: $k=$v")
+                    if (r < 0) AppLog.w(TAG, "mpv option rejected: $k")
+                    else AppLog.i(TAG, "mpv option applied: $k")
                 }
             }
             autoAdvance = settings.autoAdvance.first()
@@ -502,53 +570,71 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private suspend fun playCurrent(view: MPVPlayerView) {
-        val src = loadSource(index) ?: return
-        withContext(Dispatchers.Main) {
-            view.playFile(src.path)
-            mpv("unpause on start") {
-                MPVLib.setPropertyBoolean("pause", false)
-            }
-            isPaused = false
-            updateMediaSessionMetadata()
-            updateMediaSessionState()
-        }
+        val generation = ++loadGeneration
+        loadPending = true
+        loadSubmitted = false
+        val src = loadSource(index, generation) ?: return
+        if (generation != loadGeneration || destroyed) return
+        loadSubmitted = true
+        view.playFile(src.path)
+        mpv("unpause on start") { MPVLib.setPropertyBoolean("pause", false) }
+        isPaused = false
+        updateMediaSessionMetadata()
+        updateMediaSessionState()
     }
-
-    private suspend fun loadSource(i: Int): MpvPath.Playable? {
+    private suspend fun loadSource(i: Int, generation: Long, restart: Boolean = false): MpvPath.Playable? {
         val uriStr = uris.getOrNull(i)
         if (uriStr.isNullOrEmpty()) {
             fail("재생할 영상이 없음 (index=$i)")
             return null
         }
-        currentUri = uriStr
+        // Resolve without reassigning the visible/current item until this request wins.
         autoSubDoneIndex = -1
         subPlayables.forEach { runCatching { it.close() } }
         subPlayables.clear()
         val entity = withContext(Dispatchers.IO) { AppDb.get(this@PlayerActivity).videos().byUri(uriStr) }
-        videoTitle = entity?.name ?: Uri.parse(uriStr).lastPathSegment ?: "동영상"
+        if (generation != loadGeneration || destroyed) return null
+        val title = entity?.name ?: Uri.parse(uriStr).lastPathSegment ?: "동영상"
         val threshold = settings.watchedThreshold.first()
-        val resume = entity?.positionSec?.takeIf { it > 5 && !entity.isWatched(threshold) } ?: 0.0
-        mpv("이어보기 start=$resume") {
-            MPVLib.setOptionString("start", if (resume > 0) resume.toString() else "0")
-        }
-        position = resume
-        lastPosition = resume
-        AppLog.i(TAG, "loading item $i resume=${resume.toInt()}s title=$videoTitle")
-        val next = withContext(Dispatchers.IO) {
-            try {
-                MpvPath.open(this@PlayerActivity, Uri.parse(uriStr))
-            } catch (e: Exception) {
-                AppLog.e(TAG, "source resolve crashed: $e")
-                null
+        val resume = if (restart) 0.0 else entity?.positionSec?.takeIf { it > 5 && !entity.isWatched(threshold) } ?: 0.0
+        var resolved: MpvPath.Playable? = null
+        val next = try {
+            withContext(Dispatchers.IO) {
+                try {
+                    MpvPath.open(this@PlayerActivity, Uri.parse(uriStr)).also { resolved = it }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    AppLog.e(TAG, "source resolve crashed: $e")
+                    null
+                }
             }
+        } catch (e: CancellationException) {
+            resolved?.close()
+            throw e
+        }
+        if (generation != loadGeneration || destroyed) {
+            next?.close()
+            return null
         }
         if (next == null || next.path.isEmpty()) {
-            fail("파일을 열 수 없음: $videoTitle")
+            next?.close()
+            fail("파일을 열 수 없음: $title")
             return null
         }
         playable?.close()
         playable = next
         sourceNote = next.note
+        currentUri = uriStr
+        videoTitle = title
+        position = resume
+        lastPosition = resume
+        lastDuration = 0.0
+        loadedEntryUri = uriStr
+        mpv("이어보기 start=$resume") {
+            MPVLib.setOptionString("start", if (resume > 0) resume.toString() else "0")
+        }
+        AppLog.i(TAG, "loading item $i resume=${resume.toInt()}s title=$videoTitle")
         return next
     }
 
@@ -559,21 +645,26 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             while (true) {
                 try {
                     delay(1000)
-                    val pos = MPVLib.getPropertyDouble("time-pos") ?: continue
-                    val dur = MPVLib.getPropertyDouble("duration") ?: 0.0
-                    if (!isScrubbing) {
-                        position = pos
-                        duration = dur
+                    val entry = activeEntryId
+                    if (!destroyed && entry != null && !loadPending && loadedEntryUri == currentUri) {
+                        val engineEntry = engineEntryId()
+                        val pos = MPVLib.getPropertyDouble("time-pos") ?: continue
+                        val dur = MPVLib.getPropertyDouble("duration") ?: 0.0
+                        if (engineEntry == entry && engineEntryId() == entry) {
+                            if (!isScrubbing) {
+                                position = pos
+                                duration = dur
+                            }
+                            if (pos.isFinite() && pos >= 0 && dur.isFinite() && dur > 0) {
+                                lastPosition = pos
+                                lastDuration = dur
+                            }
+                            val pausedProp = MPVLib.getPropertyBoolean("pause")
+                            if (pausedProp != null) isPaused = pausedProp
+                            if (++tick % 3 == 0) refreshTracks()
+                            if (tick % 5 == 0) persistProgress(pos, dur, currentUri)
+                        }
                     }
-                    lastPosition = pos
-                    lastDuration = dur
-                    val pausedProp = MPVLib.getPropertyBoolean("pause")
-                    if (pausedProp != null) isPaused = pausedProp
-
-                    if (++tick % 3 == 0) {
-                        refreshTracks()
-                    }
-                    if (tick % 5 == 0) persistProgress(pos, dur)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -608,17 +699,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         return list
     }
 
-    private fun persistProgress(pos: Double, dur: Double) {
-        val uri = currentUri ?: return
-        if (dur <= 0) return
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                AppDb.get(this@PlayerActivity).videos()
-                    .saveProgress(uri, pos, dur, System.currentTimeMillis())
-            } catch (e: Exception) {
-                AppLog.e(TAG, "saveProgress failed: $e")
-            }
-        }
+    private fun persistProgress(pos: Double, dur: Double, uri: String?) {
+        if (uri == null || dur <= 0 || pos < 0 || !pos.isFinite() || !dur.isFinite()) return
+        val now = System.currentTimeMillis()
+        LibraryWork.saveProgress(applicationContext, uri, pos, dur, now)
     }
 
     private fun togglePlayPause() {
@@ -632,24 +716,69 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         resetControlsTimer()
     }
 
+    private fun captureCurrentProgress(completed: Boolean = false) {
+        if (destroyed || loadPending) return
+        val uri = loadedEntryUri ?: return
+        if (uri != currentUri) return
+        val entry = activeEntryId
+        // The engine can already be on another playlist entry when an old callback arrives.
+        // Only a matching identity may contribute a fresh sample; otherwise use the last
+        // valid sample for this loaded URI (cleared when a new source is installed).
+        runCatching {
+            if (initialized && entry != null && engineEntryId() == entry) {
+                val pos = MPVLib.getPropertyDouble("time-pos")
+                val dur = MPVLib.getPropertyDouble("duration")
+                if (engineEntryId() == entry) {
+                    if (pos != null && pos.isFinite() && pos >= 0) lastPosition = pos
+                    if (dur != null && dur.isFinite() && dur > 0) lastDuration = dur
+                }
+            }
+        }.onFailure { AppLog.w(TAG, "final progress sample failed: ${it.message}") }
+        if (completed && lastDuration.isFinite() && lastDuration > 0) {
+            lastPosition = lastDuration
+            position = lastPosition
+            duration = lastDuration
+        }
+        persistProgress(lastPosition, lastDuration, uri)
+    }
+
     private fun advance() {
         if (index >= uris.size - 1) return
-        persistProgress(lastPosition, lastDuration)
+        captureCurrentProgress()
         index += 1
+        beginManualSwitch(index)
+        resetControlsTimer()
+    }
+
+    private fun engineEntryId(): Long? {
+        val playing = MPVLib.getPropertyString("playlist-playing-pos")?.toLongOrNull()
+            ?.takeIf { it >= 0 } ?: return null
+        return MPVLib.getPropertyString("playlist/$playing/id")?.toLongOrNull()
+    }
+
+    private fun beginManualSwitch(target: Int, restart: Boolean = false) {
+        // Invalidate all event identities before source resolution can suspend.
+        rejectedEntryId = activeEntryId ?: engineEntryId()
+        loadGeneration++
+        activeEntryId = null
+        loadPending = true
+        loadSubmitted = false
+        loadedEntryUri = null
+        val generation = loadGeneration
         lifecycleScope.launch {
             val v = playerView ?: return@launch
-            val src = loadSource(index) ?: return@launch
-            withContext(Dispatchers.Main) {
-                v.playFile(src.path)
-                mpv("unpause on advance") {
-                    MPVLib.setPropertyBoolean("pause", false)
-                }
-                isPaused = false
-                updateMediaSessionMetadata()
-                updateMediaSessionState()
+            val src = loadSource(target, generation, restart) ?: return@launch
+            if (generation != loadGeneration || destroyed) {
+                src.close()
+                return@launch
             }
+            loadSubmitted = true
+            v.playFile(src.path)
+            mpv("unpause on selection") { MPVLib.setPropertyBoolean("pause", false) }
+            isPaused = false
+            updateMediaSessionMetadata()
+            updateMediaSessionState()
         }
-        resetControlsTimer()
     }
 
     private fun previous() {
@@ -664,21 +793,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             showHud(HudMode.SEEK, "처음부터 재생 (0:00)")
             updateMediaSessionState()
         } else if (index > 0) {
-            persistProgress(lastPosition, lastDuration)
+            captureCurrentProgress()
             index -= 1
-            lifecycleScope.launch {
-                val v = playerView ?: return@launch
-                val src = loadSource(index) ?: return@launch
-                withContext(Dispatchers.Main) {
-                    v.playFile(src.path)
-                    mpv("unpause on previous") {
-                        MPVLib.setPropertyBoolean("pause", false)
-                    }
-                    isPaused = false
-                    updateMediaSessionMetadata()
-                    updateMediaSessionState()
-                }
-            }
+            beginManualSwitch(index)
         }
         resetControlsTimer()
     }
@@ -952,7 +1069,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         mpv("speed=$normalized") { MPVLib.setPropertyDouble("speed", normalized) }
         AppLog.i(TAG, "speed set to $normalized")
         lifecycleScope.launch { settings.setDefaultSpeed(normalized) }
-        showHud(HudMode.ASPECT, "재생 속도: ${formatSpeed(normalized)}")
+        showHud(HudMode.ASPECT, "재생 속도: ${SettingsRepo.formatSpeed(normalized)}")
         resetControlsTimer()
     }
 
@@ -981,6 +1098,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     // P0: auto-load same-basename external subtitles from the video folder
     private fun autoLoadSubtitles() {
         val uriStr = currentUri ?: return
+        val generation = loadGeneration
         if (autoSubDoneIndex == index) return
         autoSubDoneIndex = index
         lifecycleScope.launch(Dispatchers.IO) {
@@ -1000,6 +1118,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 if (matches.isEmpty()) return@launch
                 AppLog.i(TAG, "auto-sub found ${matches.size}: ${matches.joinToString()}")
                 withContext(Dispatchers.Main) {
+                    if (destroyed || generation != loadGeneration || loadPending) return@withContext
                     matches.forEachIndexed { i, name ->
                         val doc = dir.findFile(name) ?: return@forEachIndexed
                         // Real file path: mpv subtitle demuxers often reject fd://.
@@ -1107,7 +1226,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                     preFastPlaySpeed = speed
                                     val fs = fastSpeedSetting
                                     MPVLib.setPropertyDouble("speed", fs)
-                                    showHud(HudMode.FAST_PLAY, "⚡ ${formatSpeed(fs)} 쾌속 재생 중", autoDismiss = false)
+                                    showHud(HudMode.FAST_PLAY, "⚡ ${SettingsRepo.formatSpeed(fs)} 쾌속 재생 중", autoDismiss = false)
                                 }
                             }
 
@@ -1195,6 +1314,28 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     @Composable
     private fun BoxScope.GestureHudOverlay() {
         if (hudMode == HudMode.NONE) return
+        if (controlsVisible && !isLocked) {
+            // Compact feedback stays clear of the primary button's center hit target.
+            Card(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .offset(y = 80.dp)
+                    .heightIn(max = 72.dp)
+                    .padding(horizontal = 24.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.82f)),
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Text(
+                    hudText,
+                    modifier = Modifier.padding(12.dp),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            return
+        }
 
         Card(
             modifier = Modifier
@@ -1271,7 +1412,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     // ---------------------------------------------------------------- Controls Overlay
 
     @Composable
-    private fun ControlsOverlay() {
+    private fun ControlsOverlay(onShowTitle: () -> Unit) {
         Column(
             Modifier
                 .fillMaxSize()
@@ -1285,7 +1426,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 )
                 .safeDrawingPadding()
         ) {
-            // Top Bar: Back, Title, Subtitles, Audio, Rotation, Speed, Lock
+            // Title has its own row, so toolbar buttons cannot consume its width.
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -1298,7 +1439,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 Column(
                     Modifier
                         .weight(1f)
+                        .heightIn(min = 48.dp)
+                        .clickable(
+                            role = Role.Button,
+                            onClickLabel = "전체 영상 제목 보기",
+                            onClick = onShowTitle,
+                        )
                         .padding(horizontal = 4.dp),
+                    verticalArrangement = Arrangement.Center,
                 ) {
                     Text(
                         text = videoTitle,
@@ -1314,9 +1462,22 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         "${index + 1}/${uris.size}",
                         color = Color.White.copy(alpha = 0.7f),
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(horizontal = 4.dp),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 96.dp).padding(horizontal = 4.dp),
                     )
                 }
+            }
+
+            // Separate scrollable toolbar keeps every action reachable on narrow screens.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.End,
+            ) {
 
                 // Subtitle Selection Button
                 IconButton(onClick = {
@@ -1357,11 +1518,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     border = ButtonDefaults.outlinedButtonBorder.copy(
                         brush = Brush.linearGradient(listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0.4f)))
                     ),
-                    modifier = Modifier.height(32.dp),
+                    modifier = Modifier.heightIn(min = 48.dp),
                 ) {
                     Icon(Icons.Default.Speed, null, modifier = Modifier.size(15.dp))
                     Spacer(Modifier.width(3.dp))
-                    Text(formatSpeed(speed), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(SettingsRepo.formatSpeed(speed), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
 
                 Spacer(Modifier.width(4.dp))
@@ -1456,33 +1617,18 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center,
                         ) {
-                            IconButton(onClick = { previous() }, modifier = Modifier.size(44.dp)) {
+                            IconButton(onClick = { previous() }, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Default.SkipPrevious, "이전 영상", tint = Color.White, modifier = Modifier.size(28.dp))
                             }
                             Spacer(Modifier.width(8.dp))
-                            IconButton(onClick = { seekRelative(-tapSeekSec) }, modifier = Modifier.size(42.dp)) {
+                            IconButton(onClick = { seekRelative(-tapSeekSec) }, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Default.Replay10, "${tapSeekSec.toInt()}초 뒤로", tint = Color.White, modifier = Modifier.size(24.dp))
                             }
-                            Spacer(Modifier.width(12.dp))
-                            FilledIconButton(
-                                onClick = { togglePlayPause() },
-                                modifier = Modifier.size(52.dp),
-                                shape = CircleShape,
-                                colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
-                            ) {
-                                Icon(
-                                    if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                    if (isPaused) "재생" else "일시정지",
-                                    tint = MaterialTheme.colorScheme.onPrimary,
-                                    modifier = Modifier.size(30.dp),
-                                )
-                            }
-                            Spacer(Modifier.width(12.dp))
-                            IconButton(onClick = { seekRelative(tapSeekSec) }, modifier = Modifier.size(42.dp)) {
+                            IconButton(onClick = { seekRelative(tapSeekSec) }, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Default.Forward10, "${tapSeekSec.toInt()}초 앞으로", tint = Color.White, modifier = Modifier.size(24.dp))
                             }
                             Spacer(Modifier.width(8.dp))
-                            IconButton(onClick = { advance() }, enabled = index < uris.size - 1, modifier = Modifier.size(44.dp)) {
+                            IconButton(onClick = { advance() }, enabled = index < uris.size - 1, modifier = Modifier.size(48.dp)) {
                                 Icon(
                                     Icons.Default.SkipNext, "다음 영상",
                                     tint = if (index < uris.size - 1) Color.White else Color.Gray,
@@ -1499,7 +1645,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         ) {
                             IconButton(
                                 onClick = { toggleRepeat() },
-                                modifier = Modifier.size(32.dp),
+                                modifier = Modifier.size(48.dp),
                             ) {
                                 Icon(
                                     Icons.Default.RepeatOne, "한곡 반복",
@@ -1516,7 +1662,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                 border = ButtonDefaults.outlinedButtonBorder.copy(
                                     brush = Brush.linearGradient(listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0.4f)))
                                 ),
-                                modifier = Modifier.height(30.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
                             ) {
                                 Icon(Icons.Default.AspectRatio, null, modifier = Modifier.size(14.dp))
                                 Spacer(Modifier.width(4.dp))
@@ -1539,12 +1685,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             color = Color.White,
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
                         )
-                        Spacer(Modifier.weight(1f))
 
                         IconButton(
                             onClick = { toggleRepeat() },
-                            modifier = Modifier.size(30.dp),
+                            modifier = Modifier.size(48.dp),
                         ) {
                             Icon(
                                 Icons.Default.RepeatOne, "한곡 반복",
@@ -1561,7 +1709,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             border = ButtonDefaults.outlinedButtonBorder.copy(
                                 brush = Brush.linearGradient(listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0.4f)))
                             ),
-                            modifier = Modifier.height(30.dp),
+                            modifier = Modifier.heightIn(min = 48.dp),
                         ) {
                             Icon(Icons.Default.AspectRatio, null, modifier = Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
@@ -1581,25 +1729,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             Icon(Icons.Default.SkipPrevious, "이전 영상", tint = Color.White, modifier = Modifier.size(30.dp))
                         }
                         Spacer(Modifier.width(12.dp))
-                        IconButton(onClick = { seekRelative(-tapSeekSec) }, modifier = Modifier.size(44.dp)) {
+                        IconButton(onClick = { seekRelative(-tapSeekSec) }, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Default.Replay10, "${tapSeekSec.toInt()}초 뒤로", tint = Color.White, modifier = Modifier.size(26.dp))
                         }
-                        Spacer(Modifier.width(16.dp))
-                        FilledIconButton(
-                            onClick = { togglePlayPause() },
-                            modifier = Modifier.size(56.dp),
-                            shape = CircleShape,
-                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary),
-                        ) {
-                            Icon(
-                                if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                if (isPaused) "재생" else "일시정지",
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.size(32.dp),
-                            )
-                        }
-                        Spacer(Modifier.width(16.dp))
-                        IconButton(onClick = { seekRelative(tapSeekSec) }, modifier = Modifier.size(44.dp)) {
+                        IconButton(onClick = { seekRelative(tapSeekSec) }, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Default.Forward10, "${tapSeekSec.toInt()}초 앞으로", tint = Color.White, modifier = Modifier.size(26.dp))
                         }
                         Spacer(Modifier.width(12.dp))
@@ -1921,16 +2054,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     // ---------------------------------------------------------------- Unified Speed Dialog
 
-    private fun formatSpeed(v: Double): String {
-        val r = (v * 100.0).roundToInt() / 100.0
-        val formatted = if (r % 1.0 == 0.0) {
-            "${r.toInt()}"
-        } else {
-            "%.2f".format(Locale.US, r).trimEnd('0').trimEnd('.')
-        }
-        return "${formatted}x"
-    }
-
     @Composable
     private fun SpeedDialog(
         currentSpeed: Double,
@@ -1953,7 +2076,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Speed, null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(8.dp))
-                    Text("재생 속도 (현재: ${formatSpeed(tempSpeed)})")
+                    Text("재생 속도 (선택: ${SettingsRepo.formatSpeed(tempSpeed)})")
                 }
             },
             text = {
@@ -1977,12 +2100,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                 selected = isSel,
                                 onClick = {
                                     tempSpeed = s
-                                    onSelectSpeed(s)
                                 },
                                 label = {
-                                    Text(formatSpeed(s))
+                                    Text(SettingsRepo.formatSpeed(s))
                                 },
                                 shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
                             )
                         }
                     }
@@ -1992,7 +2115,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     Spacer(Modifier.height(12.dp))
 
                     Text(
-                        "미세 속도 조절 (단위: ±${formatSpeed(safeStep)})",
+                        "미세 속도 조절 (단위: ±${SettingsRepo.formatSpeed(safeStep)})",
                         style = MaterialTheme.typography.titleSmall,
                         color = Color.Gray,
                     )
@@ -2009,9 +2132,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                 val newCents = (curCents - stepCents).coerceIn(10, 500)
                                 tempSpeed = newCents / 100.0
                             },
-                            modifier = Modifier.size(40.dp),
+                            modifier = Modifier.size(48.dp),
                         ) {
-                            Icon(Icons.Default.Remove, "속도 감소 (-${formatSpeed(safeStep)})")
+                            Icon(Icons.Default.Remove, "속도 감소 (-${SettingsRepo.formatSpeed(safeStep)})")
                         }
 
                         Slider(
@@ -2036,9 +2159,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                 val newCents = (curCents + stepCents).coerceIn(10, 500)
                                 tempSpeed = newCents / 100.0
                             },
-                            modifier = Modifier.size(40.dp),
+                            modifier = Modifier.size(48.dp),
                         ) {
-                            Icon(Icons.Default.Add, "속도 증가 (+${formatSpeed(safeStep)})")
+                            Icon(Icons.Default.Add, "속도 증가 (+${SettingsRepo.formatSpeed(safeStep)})")
                         }
                     }
 
@@ -2050,11 +2173,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         OutlinedButton(
                             onClick = {
                                 tempSpeed = 1.0
-                                onSelectSpeed(1.0)
                             },
                             shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.heightIn(min = 48.dp),
                         ) {
-                            Text("1.0x (표준 속도)")
+                            Text("${SettingsRepo.formatSpeed(1.0)} (표준 속도)")
                         }
                     }
                 }
@@ -2062,6 +2185,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             confirmButton = {
                 Button(
                     onClick = { onSelectSpeed(tempSpeed) },
+                    modifier = Modifier.heightIn(min = 48.dp),
                 ) {
                     Text("적용")
                 }
@@ -2138,44 +2262,58 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     override fun eventProperty(property: String, value: Boolean) {}
     override fun eventProperty(property: String, value: String) {}
     override fun eventProperty(property: String, value: Double) {}
-    override fun event(eventId: Int) {
-        try {
-            AppLog.i(TAG, "mpv event id=$eventId")
-            if (eventId == MPVLib.MpvEvent.MPV_EVENT_END_FILE) {
-                AppLog.i(TAG, "end of file reached (index=$index, autoAdvance=$autoAdvance, repeatOne=$repeatOne)")
-                persistProgress(lastPosition, lastDuration)
-                if (repeatOne) {
-                    runOnUiThread {
-                        mpv("repeat current file") {
-                            MPVLib.command(arrayOf("seek", "0", "absolute"))
-                            MPVLib.setPropertyBoolean("pause", false)
-                            position = 0.0
-                            lastPosition = 0.0
-                            isPaused = false
-                            updateMediaSessionState()
-                        }
-                    }
-                } else if (autoAdvance && index < uris.size - 1) {
-                    runOnUiThread { advance() }
-                } else {
-                    runOnUiThread {
-                        isPaused = true
-                        updateMediaSessionState()
-                    }
-                }
-            }
-            if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
-                AppLog.i(TAG, "file loaded (pos=${lastPosition.toInt()}s)")
-                runOnUiThread {
-                    refreshTracks()
-                    updateMediaSessionMetadata()
+    override fun startFile(playlistEntryId: Long) {
+        if (destroyed) return
+        val generation = loadGeneration
+        runOnUiThread {
+            if (destroyed || isFinishing || generation != loadGeneration || !loadSubmitted) return@runOnUiThread
+            val current = engineEntryId()
+            if (current != playlistEntryId || playlistEntryId == rejectedEntryId) return@runOnUiThread
+            activeEntryId = playlistEntryId
+            loadPending = false
+        }
+    }
+
+    override fun endFile(reason: Int, error: Int, playlistEntryId: Long) {
+        if (destroyed) return
+        runOnUiThread {
+            if (destroyed || isFinishing || activeEntryId != playlistEntryId) return@runOnUiThread
+            val endingEntry = activeEntryId
+            captureCurrentProgress(
+                completed = reason == MPVLib.MpvEndFile.MPV_END_FILE_REASON_EOF && error >= 0
+            )
+            activeEntryId = null
+            when (playbackEndAction(reason, error, playlistEntryId, endingEntry, repeatOne, autoAdvance && index < uris.size - 1)) {
+                PlaybackEndAction.REPEAT -> beginManualSwitch(index, restart = true)
+                PlaybackEndAction.ADVANCE -> advance()
+                PlaybackEndAction.PAUSE -> {
+                    isPaused = true
                     updateMediaSessionState()
                 }
+                PlaybackEndAction.ERROR -> fail("재생 오류 (error=$error)")
+                PlaybackEndAction.IGNORE -> Unit
+            }
+        }
+    }
+
+    override fun event(eventId: Int) {
+        if (destroyed) return
+        if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
+            runOnUiThread {
+                if (destroyed || isFinishing || loadPending || engineEntryId() != activeEntryId) return@runOnUiThread
+                val loadedDuration = MPVLib.getPropertyDouble("duration")
+                if (loadedDuration != null && loadedDuration.isFinite() && loadedDuration > 0 &&
+                    engineEntryId() == activeEntryId
+                ) {
+                    lastDuration = loadedDuration
+                    duration = loadedDuration
+                }
+                refreshTracks()
+                updateMediaSessionMetadata()
+                updateMediaSessionState()
                 autoLoadSubtitles()
             }
-        } catch (e: Exception) {
-            AppLog.e(TAG, "event handler failed: $e")
-        }
+        } else AppLog.i(TAG, "mpv event id=$eventId")
     }
 
     override fun logMessage(prefix: String, level: Int, text: String) {
@@ -2206,17 +2344,20 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     override fun onPause() {
+        captureCurrentProgress()
         super.onPause()
-        persistProgress(lastPosition, lastDuration)
         if (initialized) mpv("pause") { MPVLib.setPropertyBoolean("pause", true) }
     }
 
     override fun onDestroy() {
+        captureCurrentProgress()
+        destroyed = true
+        loadGeneration++
+        activeEntryId = null
         super.onDestroy()
         pollJob?.cancel()
         controlsTimerJob?.cancel()
         hudJob?.cancel()
-        persistProgress(lastPosition, lastDuration)
         runCatching { playable?.close() }
         playable = null
         subPlayables.forEach { runCatching { it.close() } }

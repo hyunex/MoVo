@@ -63,7 +63,7 @@ object AppLog {
         sb.append("\n\n--- recent log ---\n")
         sb.append(buf.toList().takeLast(200).joinToString("\n"))
         sb.append("\n")
-        File(d, name).writeText(maskPaths(sb.toString()))
+        File(d, name).writeText(sb.toString())
         pruneCrashLocked()
     }
 
@@ -104,8 +104,24 @@ object AppLog {
     fun pendingCrashReports(): List<File> =
         dir?.listFiles { f -> f.name.startsWith("crash-") }?.sortedBy { it.name } ?: emptyList()
 
-    fun shareFileIntent(ctx: Context, f: File): Intent {
-        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", f)
+    @Synchronized
+    fun shareFileIntent(ctx: Context, f: File): Intent = exportIntent(ctx, f.readText())
+
+    /** Only this boundary publishes report bytes; local logs and crash previews stay private. */
+    private fun exportIntent(ctx: Context, report: String): Intent {
+        val d = requireNotNull(dir) { "AppLog is not installed" }
+        val exported = File.createTempFile("shared-", ".log", d)
+        try {
+            check(exported.setReadable(false, false) && exported.setWritable(false, false) &&
+                exported.setReadable(true, true) && exported.setWritable(true, true)) {
+                "Cannot restrict report permissions"
+            }
+            exported.writeText(maskPaths(report))
+        } catch (failure: Exception) {
+            exported.delete()
+            throw failure
+        }
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", exported)
         return Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_STREAM, uri)
@@ -159,18 +175,72 @@ object AppLog {
         return "메모리 ${buf.size}줄 · 파일 ${files.size}개 (${size / 1024}KB) · ${Build.MODEL} API ${Build.VERSION.SDK_INT}"
     }
 
-    /** 절대경로 유출 방지: 공유/저장 전에 사용자 경로를 마스킹. */
-    fun maskPaths(text: String): String =
-        text.replace(Regex("/(storage|data|sdcard)[^ \t\n\"]*"), "<path>")
+    private val encodedSeparators = Regex("""(?i)%25|%2f|%3a|%5c|\\u00(?:2f|3a|5c)|\\/""")
+    private val sensitiveValue = Regex(
+        """(?ix)
+        (?:content|file)://
+        | /(?:storage|data|data_mirror|sdcard|mnt|cache|external_files)(?:/|\b)
+        | \b(?:primary|[0-9a-f]{4}-[0-9a-f]{4}):
+        """,
+    )
+    private val sensitiveField = Regex(
+        """(?i)\b(?:title|filename|file_name|display_name|displayname|uri|path|source)(?:\\?["'])?\s*[=:]\s*""",
+    )
+    private val sourceLabel = Regex(
+        """(?i)(?:\bopen\s+|\b(?:openFileDescriptor|real-path probe|cacheCopy) failed for\s+|""" +
+            """\bno readable source for\s+|\bsubtitle too large, rejected\s+)""",
+    )
+    private val exceptionClass = Regex("""\b(?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*(?:Exception|Error)\b""")
 
+    /**
+     * Export policy: once a sensitive value starts, discard the entire line tail.
+     * Whitespace/quotes cannot delimit user filenames reliably (including SAF source labels).
+     * Decode separator spellings only, so encoded/JSON-escaped paths follow the same policy;
+     * do not decode newlines into fresh, potentially unrecognised log records.
+     */
+    fun maskPaths(text: String): String = text.lineSequence().joinToString("\n") { raw ->
+        var line = raw
+        do {
+            val previous = line
+            line = encodedSeparators.replace(line) {
+                when (it.value.lowercase(Locale.ROOT)) {
+                    "%25" -> "%"
+                    "%3a", "\\u003a" -> ":"
+                    "%5c", "\\u005c" -> "\\"
+                    else -> "/"
+                }
+            }
+        } while (line != previous)
+        val value = sensitiveValue.find(line)
+        val label = sourceLabel.find(line)
+        val field = sensitiveField.find(line)
+        val start = listOfNotNull(value?.range?.first, field?.let { it.range.last + 1 },
+            label?.let { it.range.last + 1 }).minOrNull()
+        if (start == null) line else {
+            val prefix = line.substring(0, start)
+            val classes = exceptionClass.findAll(line.substring(start)).map { it.value }.distinct().toList()
+            prefix + "<path>" + if (classes.isEmpty()) "" else " [${classes.joinToString(", ")}]"
+        }
+    }
+
+    @Synchronized
     fun shareIntent(ctx: Context): Intent? {
         val d = dir ?: return null
-        val f = d.listFiles()?.maxByOrNull { it.name } ?: return null
-        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", f)
-        return Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val crashes = pendingCrashReports()
+        val recent = if (buf.isNotEmpty()) tail(MAX_LINES) else {
+            d.listFiles { f -> f.name.startsWith("mpv-") && f.isFile }
+                ?.maxByOrNull { it.name }?.readText().orEmpty()
         }
+        if (recent.isEmpty() && crashes.isEmpty()) return null
+        val report = buildString {
+            append("MoVo debug report\n")
+            append("device=${Build.MODEL} api=${Build.VERSION.SDK_INT}\n\n--- recent log ---\n")
+            append(recent)
+            for (crash in crashes) {
+                append("\n\n--- crash report ---\n")
+                append(crash.readText())
+            }
+        }
+        return exportIntent(ctx, report)
     }
 }
