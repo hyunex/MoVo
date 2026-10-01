@@ -80,9 +80,9 @@ inputs does not claim a byte-identical recompilation of the complete engine.
   remains licensed under GPL-3.0 (`LICENSE`); replacing native components does
   not by itself change that license.
 
-The corresponding-source delivery for this version is
-`MoVo-corresponding-source.tar.gz` and its `.sha256`, to be published with the
-[MoVo v1.0.29 release](https://github.com/hyunex/MoVo/releases/tag/v1.0.29).
+Corresponding source for this version is provided as
+[`MoVo-corresponding-source.tar.gz`](https://github.com/hyunex/MoVo/releases/download/v1.0.29/MoVo-corresponding-source.tar.gz)
+with the [MoVo v1.0.29 release](https://github.com/hyunex/MoVo/releases/tag/v1.0.29).
 The archive includes the application, modified JNI sources, build scripts,
 license files, the central source lock, the public native binary manifest,
 and **all 22 actual pinned upstream source archives**. It excludes precompiled
@@ -98,8 +98,9 @@ allow the original `download-deps.sh` to skip downloads/clones, rather than
 resolve floating revisions. The lock includes the exact URLs, sizes,
 checksums, revisions, and nested preparation paths.
 
-The [README](README.md#고정된-네이티브-소스-준비--jni-재빌드) gives portable
-preparation, bridge-build, binary-recording, and bundling commands. A full
+Source preparation, binary recording, and bundling are implemented by
+[`package-native-sources.py`](package-native-sources.py); bridge-building by
+[`mpv-player/app/buildNative.py`](mpv-player/app/buildNative.py). A full
 engine rebuild uses the original scripts in the prepared `buildscripts/`
 tree and their required toolchain, followed by the modified bridge build and
 Gradle APK build. `mpv-player/app/buildNative.py` checks pinned source archives,
