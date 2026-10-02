@@ -81,8 +81,8 @@ inputs does not claim a byte-identical recompilation of the complete engine.
   not by itself change that license.
 
 Corresponding source for this version is provided as
-[`MoVo-corresponding-source.tar.gz`](https://github.com/hyunex/MoVo/releases/download/v1.0.29/MoVo-corresponding-source.tar.gz)
-with the [MoVo v1.0.29 release](https://github.com/hyunex/MoVo/releases/tag/v1.0.29).
+[`MoVo-corresponding-source.tar.gz`](https://github.com/hyunex/MoVo/releases/download/v1.0.30/MoVo-corresponding-source.tar.gz)
+with the [MoVo v1.0.30 release](https://github.com/hyunex/MoVo/releases/tag/v1.0.30).
 The archive includes the application, modified JNI sources, build scripts,
 license files, the central source lock, the public native binary manifest,
 and **all 22 actual pinned upstream source archives**. It excludes precompiled

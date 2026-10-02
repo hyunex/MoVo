@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import re
-import secrets
 import shutil
 import subprocess
 import sys
@@ -15,8 +14,8 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "1.0.29"
-CODE = "30"
+VERSION = "1.0.30"
+CODE = "31"
 PACKAGE = "com.example.mpvlibrary"
 VARIANTS = {"arm64-v8a": "arm64", "armeabi-v7a": "armv7", "x86_64": "x86_64", "universal": "universal"}
 
@@ -112,10 +111,10 @@ def check_manifest(aapt, apk, abi, unsigned):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, epilog="Build first: cd mpv-player && ./gradlew assembleRelease. Default mode requires the previous published APK and matching old private key; no fresh-install fallback.")
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Build first: cd mpv-player && ./gradlew assembleRelease. Requires the previous published APK, matching legacy and dedicated private keys, and existing signing lineage; no new signing identity or fresh-install fallback.")
     parser.add_argument("--input-dir", type=Path, default=ROOT / "mpv-player/app/build/outputs/apk/release")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "release-artifacts" / VERSION)
-    parser.add_argument("--previous-apk", type=Path, default=os.environ.get("PREVIOUS_APK", "/tmp/MoVo-v1.0.28-arm64.apk"))
+    parser.add_argument("--previous-apk", type=Path, default=os.environ.get("PREVIOUS_APK", "/tmp/MoVo-v1.0.29-arm64.apk"))
     parser.add_argument("--build-tools", type=Path, default=None, help="Android SDK build-tools directory; or set ANDROID_BUILD_TOOLS")
     args = parser.parse_args()
     os.umask(0o077)
@@ -135,10 +134,14 @@ def main():
     if not args.previous_apk.is_file():
         fail(f"Previous published APK is required: {args.previous_apk}; set PREVIOUS_APK or --previous-apk")
     prior_badging = run([aapt, "dump", "badging", args.previous_apk])
-    if f"package: name='{PACKAGE}' versionCode='29' versionName='1.0.28'" not in prior_badging:
-        fail("Previous APK must be the published MoVo 1.0.28/code 29 with the same package")
-    prior_evidence = run([apksigner, "verify", "--min-sdk-version", "26", "--print-certs", args.previous_apk])
-    prior_cert = one_fingerprint(prior_evidence, "previous published APK")
+    if f"package: name='{PACKAGE}' versionCode='30' versionName='1.0.29'" not in prior_badging:
+        fail("Previous APK must be the published MoVo 1.0.29/code 30 with the same package")
+    prior_old_evidence = run([apksigner, "verify", "--min-sdk-version", "26",
+                              "--max-sdk-version", "27", "--print-certs", args.previous_apk])
+    prior_old_cert = one_fingerprint(prior_old_evidence, "previous published APK / API 26-27")
+    prior_new_evidence = run([apksigner, "verify", "--min-sdk-version", "28",
+                              "--print-certs", args.previous_apk])
+    prior_new_cert = one_fingerprint(prior_new_evidence, "previous published APK / API 28+")
     inputs = {abi: args.input_dir / f"app-{abi}-release-unsigned.apk" for abi in VARIANTS}
     actual = set(args.input_dir.glob("*.apk"))
     if actual != set(inputs.values()):
@@ -161,12 +164,13 @@ def main():
     secure_file(old_key)
     old_der = export_certificate(keytool, old_key, old_alias, "MOVO_OLD_PASSWORD", env)
     old_cert = hashlib.sha256(old_der).hexdigest()
-    if old_cert != prior_cert:
-        fail("OLD_KEYSTORE certificate does not match previous published APK; refusing rotation")
+    if old_cert != prior_old_cert:
+        fail("OLD_KEYSTORE certificate does not match previous published APK on API 26/27; refusing release")
     private = Path.home() / ".config/movo-signing"
     if private.is_symlink() or private.resolve().is_relative_to(ROOT):
         fail("Signing directory must be a real directory outside the repository")
-    private.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not private.is_dir():
+        fail("Existing signing directory is required; restore signing backups, never replace the identity")
     if private.stat().st_uid != os.getuid():
         fail("Signing directory is not owned by this user")
     private.chmod(0o700)
@@ -179,42 +183,17 @@ def main():
     with lock.open("a") as lock_stream:
         lock.chmod(0o600)
         fcntl.flock(lock_stream, fcntl.LOCK_EX)
-        if key.exists() or key.is_symlink():
-            secure_file(key)
-            env["MOVO_RELEASE_PASSWORD"] = password(pass_file)
-        else:
-            if lineage.exists():
-                fail("Lineage exists but release key is missing; restore backups, never replace the key")
-            if pass_file.exists() or pass_file.is_symlink():
-                env["MOVO_RELEASE_PASSWORD"] = password(pass_file)
-            else:
-                value = secrets.token_urlsafe(48)
-                with pass_file.open("x") as stream:
-                    stream.write(value + "\n")
-                pass_file.chmod(0o600)
-                env["MOVO_RELEASE_PASSWORD"] = value
-            with tempfile.TemporaryDirectory(prefix="key-init-", dir=private) as temp:
-                temp_key = Path(temp) / "release.jks"
-                run([keytool, "-genkeypair", "-keystore", temp_key, "-storetype", "JKS",
-                     "-alias", "movo-release", "-keyalg", "RSA", "-keysize", "3072",
-                     "-validity", "10000", "-dname", "CN=MoVo Release, O=MoVo",
-                     "-storepass:env", "MOVO_RELEASE_PASSWORD", "-keypass:env", "MOVO_RELEASE_PASSWORD", "-noprompt"], env)
-                temp_key.chmod(0o600)
-                os.link(temp_key, key)  # Exclusive creation: never replace an existing identity.
+        secure_file(key)
+        env["MOVO_RELEASE_PASSWORD"] = password(pass_file)
+        secure_file(lineage)
         new_der = export_certificate(keytool, key, "movo-release", "MOVO_RELEASE_PASSWORD", env)
         new_cert = hashlib.sha256(new_der).hexdigest()
+        if new_cert != prior_new_cert:
+            fail("Stored release key certificate does not match previous published APK on API 28+; refusing release")
         if old_cert == new_cert:
             fail("Dedicated release key must differ from legacy key")
         old_options = signer(old_key, old_alias, "MOVO_OLD_PASSWORD")
         new_options = signer(key, "movo-release", "MOVO_RELEASE_PASSWORD")
-        if not lineage.exists():
-            with tempfile.TemporaryDirectory(prefix="lineage-init-", dir=private) as temp:
-                temp_lineage = Path(temp) / "release.lineage"
-                run([apksigner, "rotate", "--out", temp_lineage, "--old-signer", *old_options,
-                     "--set-installed-data", "true", "--set-rollback", "false",
-                     "--new-signer", *new_options], env)
-                os.link(temp_lineage, lineage)
-        secure_file(lineage)
         lineage_evidence = run([apksigner, "lineage", "--in", lineage, "--print-certs"])
         if [x.lower() for x in fingerprints(lineage_evidence)] != [old_cert, new_cert]:
             fail("Existing lineage does not exactly match legacy -> dedicated release certificates")

@@ -152,7 +152,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var playerView: MPVPlayerView? = null
     private var playable: MpvPath.Playable? = null
     private var uris: ArrayList<String> = arrayListOf()
-    private var index = 0
+    private var index by mutableIntStateOf(0)
     private var currentUri: String? = null
     private var sourceNote: String = ""
     private var lastPosition = 0.0
@@ -369,20 +369,42 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     // Same un-inset bounds as the video view, independent of the control column.
                     // This clickable sibling sits above the gesture layer in hit testing.
                     if (controlsVisible && !isLocked) {
-                        FilledIconButton(
-                            onClick = { togglePlayPause() },
-                            modifier = Modifier.align(Alignment.Center).size(64.dp),
-                            shape = CircleShape,
-                            colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                            ),
+                        Row(
+                            modifier = Modifier.align(Alignment.Center),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Icon(
-                                if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                if (isPaused) "재생" else "일시정지",
-                                tint = MaterialTheme.colorScheme.onPrimary,
-                                modifier = Modifier.size(36.dp),
-                            )
+                            FilledTonalIconButton(
+                                onClick = { previousFile() },
+                                enabled = index > 0,
+                                modifier = Modifier.size(48.dp),
+                                shape = CircleShape,
+                            ) {
+                                Icon(Icons.Default.SkipPrevious, "이전 파일", modifier = Modifier.size(28.dp))
+                            }
+                            FilledIconButton(
+                                onClick = { togglePlayPause() },
+                                modifier = Modifier.size(64.dp),
+                                shape = CircleShape,
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                ),
+                            ) {
+                                Icon(
+                                    if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                    if (isPaused) "재생" else "일시정지",
+                                    tint = MaterialTheme.colorScheme.onPrimary,
+                                    modifier = Modifier.size(36.dp),
+                                )
+                            }
+                            FilledTonalIconButton(
+                                onClick = { advance() },
+                                enabled = index < uris.size - 1,
+                                modifier = Modifier.size(48.dp),
+                                shape = CircleShape,
+                            ) {
+                                Icon(Icons.Default.SkipNext, "다음 파일", modifier = Modifier.size(28.dp))
+                            }
                         }
                     }
 
@@ -750,6 +772,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         resetControlsTimer()
     }
 
+    private fun previousFile() {
+        if (index <= 0) return
+        captureCurrentProgress()
+        index -= 1
+        beginManualSwitch(index)
+        resetControlsTimer()
+    }
+
     private fun engineEntryId(): Long? {
         val playing = MPVLib.getPropertyString("playlist-playing-pos")?.toLongOrNull()
             ?.takeIf { it >= 0 } ?: return null
@@ -793,9 +823,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             showHud(HudMode.SEEK, "처음부터 재생 (0:00)")
             updateMediaSessionState()
         } else if (index > 0) {
-            captureCurrentProgress()
-            index -= 1
-            beginManualSwitch(index)
+            previousFile()
+            return
         }
         resetControlsTimer()
     }
@@ -1617,23 +1646,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center,
                         ) {
-                            IconButton(onClick = { previous() }, modifier = Modifier.size(48.dp)) {
-                                Icon(Icons.Default.SkipPrevious, "이전 영상", tint = Color.White, modifier = Modifier.size(28.dp))
-                            }
-                            Spacer(Modifier.width(8.dp))
                             IconButton(onClick = { seekRelative(-tapSeekSec) }, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Default.Replay10, "${tapSeekSec.toInt()}초 뒤로", tint = Color.White, modifier = Modifier.size(24.dp))
                             }
                             IconButton(onClick = { seekRelative(tapSeekSec) }, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Default.Forward10, "${tapSeekSec.toInt()}초 앞으로", tint = Color.White, modifier = Modifier.size(24.dp))
-                            }
-                            Spacer(Modifier.width(8.dp))
-                            IconButton(onClick = { advance() }, enabled = index < uris.size - 1, modifier = Modifier.size(48.dp)) {
-                                Icon(
-                                    Icons.Default.SkipNext, "다음 영상",
-                                    tint = if (index < uris.size - 1) Color.White else Color.Gray,
-                                    modifier = Modifier.size(28.dp),
-                                )
                             }
                         }
 
@@ -1725,23 +1742,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        IconButton(onClick = { previous() }, modifier = Modifier.size(48.dp)) {
-                            Icon(Icons.Default.SkipPrevious, "이전 영상", tint = Color.White, modifier = Modifier.size(30.dp))
-                        }
-                        Spacer(Modifier.width(12.dp))
                         IconButton(onClick = { seekRelative(-tapSeekSec) }, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Default.Replay10, "${tapSeekSec.toInt()}초 뒤로", tint = Color.White, modifier = Modifier.size(26.dp))
                         }
                         IconButton(onClick = { seekRelative(tapSeekSec) }, modifier = Modifier.size(48.dp)) {
                             Icon(Icons.Default.Forward10, "${tapSeekSec.toInt()}초 앞으로", tint = Color.White, modifier = Modifier.size(26.dp))
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        IconButton(onClick = { advance() }, enabled = index < uris.size - 1, modifier = Modifier.size(48.dp)) {
-                            Icon(
-                                Icons.Default.SkipNext, "다음 영상",
-                                tint = if (index < uris.size - 1) Color.White else Color.Gray,
-                                modifier = Modifier.size(30.dp),
-                            )
                         }
                     }
                 }
