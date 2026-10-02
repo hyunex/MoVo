@@ -27,9 +27,23 @@ data class VideoEntity(
     val watchedOverride: Int = 0,
     val sizeBytes: Long = 0,
     val lastModified: Long = 0,
+    val videoWidth: Int? = null,
+    val videoHeight: Int? = null,
+    val hasEmbeddedSubtitles: Boolean? = null,
+    val hasExternalSubtitles: Boolean? = null,
+    @androidx.room.ColumnInfo(defaultValue = "0")
+    val metadataChecked: Boolean = false,
 ) {
     val fraction: Double
         get() = if (durationSec > 0) (positionSec / durationSec).coerceIn(0.0, 1.0) else 0.0
+
+    /** Absence is known only after both native inspection and sibling inventory. */
+    val hasSubtitles: Boolean?
+        get() = when {
+            hasEmbeddedSubtitles == true || hasExternalSubtitles == true -> true
+            hasEmbeddedSubtitles == false && hasExternalSubtitles == false -> false
+            else -> null
+        }
 
     fun isWatched(threshold: Double): Boolean =
         watchedOverride == 1 || (watchedOverride == 0 && fraction >= threshold)

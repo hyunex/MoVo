@@ -130,6 +130,15 @@ fun playbackEndAction(
     }
 }
 
+/** Wall-clock estimate only; playback positions and duration remain in media seconds. */
+fun playbackRemainingSeconds(duration: Double, position: Double, effectiveSpeed: Double): Double {
+    if (!duration.isFinite() || duration <= 0.0 || !position.isFinite() ||
+        !effectiveSpeed.isFinite() || effectiveSpeed <= 0.0
+    ) return 0.0
+    val remaining = (duration - position).coerceAtLeast(0.0) / effectiveSpeed
+    return if (remaining.isFinite()) remaining else 0.0
+}
+
 class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObserver {
 
     companion object {
@@ -172,6 +181,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var position by mutableStateOf(0.0)
     private var duration by mutableStateOf(0.0)
     private var isPaused by mutableStateOf(false)
+    // Effective engine speed; long-press overrides are restored without changing preferences.
     private var speed by mutableStateOf(1.0)
     private var preFastPlaySpeed = 1.0
     private var speedPresets by mutableStateOf<List<Double>>(SettingsRepo.DEFAULT_SPEED_PRESETS)
@@ -1255,6 +1265,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                     preFastPlaySpeed = speed
                                     val fs = fastSpeedSetting
                                     MPVLib.setPropertyDouble("speed", fs)
+                                    speed = fs
                                     showHud(HudMode.FAST_PLAY, "⚡ ${SettingsRepo.formatSpeed(fs)} 쾌속 재생 중", autoDismiss = false)
                                 }
                             }
@@ -1301,6 +1312,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             showHud(HudMode.SEEK, "이동: ${fmt(currentSeekTarget)}")
                         } else if (isFastPlay) {
                             MPVLib.setPropertyDouble("speed", preFastPlaySpeed)
+                            speed = preFastPlaySpeed
                             showHud(HudMode.NONE, "")
                         } else if (isPinch || isBrightness || isVolume) {
                             if (isBrightness && lastBrightness > 0) {
@@ -1631,7 +1643,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         // Left: Time info
                         val curTime = fmt(if (isScrubbing) scrubPosition else position)
                         val durTime = fmt(duration)
-                        val remainSec = (duration - (if (isScrubbing) scrubPosition else position)).coerceAtLeast(0.0)
+                        val remainSec = playbackRemainingSeconds(duration, if (isScrubbing) scrubPosition else position, speed)
                         val remainTime = "-${fmt(remainSec)}"
                         Text(
                             "$curTime / $durTime ($remainTime)",
@@ -1695,7 +1707,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     ) {
                         val curTime = fmt(if (isScrubbing) scrubPosition else position)
                         val durTime = fmt(duration)
-                        val remainSec = (duration - (if (isScrubbing) scrubPosition else position)).coerceAtLeast(0.0)
+                        val remainSec = playbackRemainingSeconds(duration, if (isScrubbing) scrubPosition else position, speed)
                         val remainTime = "-${fmt(remainSec)}"
                         Text(
                             "$curTime / $durTime ($remainTime)",

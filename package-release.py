@@ -14,8 +14,8 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "1.0.30"
-CODE = "31"
+VERSION = "1.0.31"
+CODE = "32"
 PACKAGE = "com.example.mpvlibrary"
 VARIANTS = {"arm64-v8a": "arm64", "armeabi-v7a": "armv7", "x86_64": "x86_64", "universal": "universal"}
 
@@ -114,7 +114,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog="Build first: cd mpv-player && ./gradlew assembleRelease. Requires the previous published APK, matching legacy and dedicated private keys, and existing signing lineage; no new signing identity or fresh-install fallback.")
     parser.add_argument("--input-dir", type=Path, default=ROOT / "mpv-player/app/build/outputs/apk/release")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "release-artifacts" / VERSION)
-    parser.add_argument("--previous-apk", type=Path, default=os.environ.get("PREVIOUS_APK", "/tmp/MoVo-v1.0.29-arm64.apk"))
+    parser.add_argument("--previous-apk", type=Path, default=os.environ.get("PREVIOUS_APK", "/tmp/MoVo-v1.0.30-arm64.apk"))
     parser.add_argument("--build-tools", type=Path, default=None, help="Android SDK build-tools directory; or set ANDROID_BUILD_TOOLS")
     args = parser.parse_args()
     os.umask(0o077)
@@ -134,8 +134,8 @@ def main():
     if not args.previous_apk.is_file():
         fail(f"Previous published APK is required: {args.previous_apk}; set PREVIOUS_APK or --previous-apk")
     prior_badging = run([aapt, "dump", "badging", args.previous_apk])
-    if f"package: name='{PACKAGE}' versionCode='30' versionName='1.0.29'" not in prior_badging:
-        fail("Previous APK must be the published MoVo 1.0.29/code 30 with the same package")
+    if f"package: name='{PACKAGE}' versionCode='31' versionName='1.0.30'" not in prior_badging:
+        fail("Previous APK must be the published MoVo 1.0.30/code 31 with the same package")
     prior_old_evidence = run([apksigner, "verify", "--min-sdk-version", "26",
                               "--max-sdk-version", "27", "--print-certs", args.previous_apk])
     prior_old_cert = one_fingerprint(prior_old_evidence, "previous published APK / API 26-27")

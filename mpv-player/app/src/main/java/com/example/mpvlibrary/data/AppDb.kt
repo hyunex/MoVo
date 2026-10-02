@@ -7,7 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [FolderEntity::class, VideoEntity::class], version = 2, exportSchema = false)
+@Database(entities = [FolderEntity::class, VideoEntity::class], version = 3, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun folders(): FolderDao
     abstract fun videos(): VideoDao
@@ -33,13 +33,23 @@ abstract class AppDb : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE videos ADD COLUMN videoWidth INTEGER")
+                database.execSQL("ALTER TABLE videos ADD COLUMN videoHeight INTEGER")
+                database.execSQL("ALTER TABLE videos ADD COLUMN hasEmbeddedSubtitles INTEGER")
+                database.execSQL("ALTER TABLE videos ADD COLUMN hasExternalSubtitles INTEGER")
+                database.execSQL("ALTER TABLE videos ADD COLUMN metadataChecked INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         @Volatile private var instance: AppDb? = null
 
         fun get(context: Context): AppDb =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
                     context.applicationContext, AppDb::class.java, "library.db",
-                ).addMigrations(MIGRATION_1_2).build().also { instance = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
             }
     }
 }

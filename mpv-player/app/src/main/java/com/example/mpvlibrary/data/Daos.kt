@@ -50,8 +50,15 @@ interface VideoDao {
     suspend fun insertNew(videos: List<VideoEntity>)
 
     /** Refresh filesystem metadata only — never touches playback progress. */
-    @Query("UPDATE videos SET name = :name, dirPath = :dirPath, sizeBytes = :size, lastModified = :modified WHERE uri = :uri AND (name != :name OR dirPath != :dirPath OR sizeBytes != :size OR lastModified != :modified)")
+    @Query("UPDATE videos SET videoWidth = CASE WHEN sizeBytes != :size OR lastModified != :modified THEN NULL ELSE videoWidth END, videoHeight = CASE WHEN sizeBytes != :size OR lastModified != :modified THEN NULL ELSE videoHeight END, hasEmbeddedSubtitles = CASE WHEN sizeBytes != :size OR lastModified != :modified THEN NULL ELSE hasEmbeddedSubtitles END, metadataChecked = CASE WHEN sizeBytes != :size OR lastModified != :modified THEN 0 ELSE metadataChecked END, name = :name, dirPath = :dirPath, sizeBytes = :size, lastModified = :modified WHERE uri = :uri AND (name != :name OR dirPath != :dirPath OR sizeBytes != :size OR lastModified != :modified)")
     suspend fun refreshMetaIfChanged(uri: String, name: String, dirPath: String, size: Long, modified: Long)
+
+    @Query("UPDATE videos SET hasExternalSubtitles = :present WHERE uri = :uri AND (hasExternalSubtitles IS NULL OR hasExternalSubtitles != :present)")
+    suspend fun updateExternalSubtitles(uri: String, present: Boolean)
+
+    /** A replaced file or another completed probe cannot receive this stale result. */
+    @Query("UPDATE videos SET videoWidth = :width, videoHeight = :height, hasEmbeddedSubtitles = :subtitles, durationSec = CASE WHEN :duration > 0 THEN :duration ELSE durationSec END, metadataChecked = 1 WHERE uri = :uri AND sizeBytes = :size AND lastModified = :modified AND metadataChecked = 0")
+    suspend fun saveMetadata(uri: String, size: Long, modified: Long, width: Int?, height: Int?, subtitles: Boolean?, duration: Double?)
 
     @Query("DELETE FROM videos WHERE folderId = :folderId")
     suspend fun deleteForFolder(folderId: Long)

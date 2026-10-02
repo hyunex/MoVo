@@ -31,6 +31,14 @@ object MPVLib {
 
     external fun grabThumbnail(dimension: Int): Bitmap?
 
+    /**
+     * Demux a borrowed, seekable descriptor without creating or using the player.
+     * Returns [durationUs, codedWidth, codedHeight, embeddedSubtitles (0/1)],
+     * with -1 for unknown duration and 0 for unknown dimensions; null on failure.
+     * The caller must retain the descriptor until return and close it afterward.
+     */
+    external fun probeMedia(fd: Int): LongArray?
+
     external fun getPropertyInt(property: String): Int?
     external fun setPropertyInt(property: String, value: Int)
     external fun getPropertyDouble(property: String): Double?

@@ -9,10 +9,12 @@ MoVo itself is licensed under the GNU General Public License v3.0 (see `LICENSE`
 [mpv-android at ad98fc97ff1d25e217389e7238a1abda8c13a6c4](https://github.com/mpv-android/mpv-android/tree/ad98fc97ff1d25e217389e7238a1abda8c13a6c4)
 and modified for MoVo; it is not a verbatim copy.
 The modified MIT native bridge sources are in `mpv-player/native/bridge/`.
-MoVo 1.0.29 rebuilds `libplayer.so` for `arm64-v8a`, `armeabi-v7a`, and
-`x86_64` with NDK 29.0.14206865 and Android API 26. The bridge sends structured
+MoVo 1.0.31 rebuilds `libplayer.so` for `arm64-v8a`, `armeabi-v7a`, and
+`x86_64` with NDK 29.0.14206865 and Android API 26. The bridge retains structured
 START events with a 64-bit playlist ID and END events with reason, error,
 and the same ID so that only the current item's normal EOF advances playback.
+It now also probes media through the retained FFmpeg libraries for full duration,
+coded video dimensions, and embedded subtitle streams (including ASS).
 It links the retained packaged engine libraries, including `libc++_shared.so`;
 this bridge build is not a rebuild of the complete native engine.
 The upstream MIT copyright and license follow unchanged.
@@ -81,8 +83,8 @@ inputs does not claim a byte-identical recompilation of the complete engine.
   not by itself change that license.
 
 Corresponding source for this version is provided as
-[`MoVo-corresponding-source.tar.gz`](https://github.com/hyunex/MoVo/releases/download/v1.0.30/MoVo-corresponding-source.tar.gz)
-with the [MoVo v1.0.30 release](https://github.com/hyunex/MoVo/releases/tag/v1.0.30).
+[`MoVo-corresponding-source.tar.gz`](https://github.com/hyunex/MoVo/releases/download/v1.0.31/MoVo-corresponding-source.tar.gz)
+with the [MoVo v1.0.31 release](https://github.com/hyunex/MoVo/releases/tag/v1.0.31).
 The archive includes the application, modified JNI sources, build scripts,
 license files, the central source lock, the public native binary manifest,
 and **all 22 actual pinned upstream source archives**. It excludes precompiled

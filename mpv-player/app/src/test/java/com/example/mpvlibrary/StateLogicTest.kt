@@ -10,6 +10,7 @@ import com.example.mpvlibrary.ui.naturalKey
 import com.example.mpvlibrary.ui.buildContinuePlaylist
 import com.example.mpvlibrary.ui.PlaybackEndAction
 import com.example.mpvlibrary.ui.playbackEndAction
+import com.example.mpvlibrary.ui.playbackRemainingSeconds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -51,6 +52,33 @@ class StateLogicTest {
 
     @Test fun unknownDurationIsZeroProgress() {
         assertEquals(0.0, video(100.0, 0.0).fraction, 0.0)
+    }
+
+    @Test fun remainingTimeScalesWithSpeedAndSelectedPosition() {
+        assertEquals(90.0, playbackRemainingSeconds(120.0, 30.0, 1.0), 0.0)
+        assertEquals(45.0, playbackRemainingSeconds(120.0, 30.0, 2.0), 0.0)
+        assertEquals(180.0, playbackRemainingSeconds(120.0, 30.0, 0.5), 0.0)
+        assertEquals(30.0, playbackRemainingSeconds(120.0, 60.0, 2.0), 0.0)
+        assertEquals(72.0, playbackRemainingSeconds(120.0, 30.0, 1.25), 0.0)
+    }
+
+    @Test fun remainingTimeClampsAtAndBeyondEndForEverySpeed() {
+        for (speed in listOf(0.5, 1.0, 2.0)) {
+            assertEquals(0.0, playbackRemainingSeconds(120.0, 120.0, speed), 0.0)
+            assertEquals(0.0, playbackRemainingSeconds(120.0, 121.0, speed), 0.0)
+        }
+    }
+
+    @Test fun remainingTimeIsZeroForUnknownOrInvalidInputs() {
+        for (duration in listOf(0.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            assertEquals(0.0, playbackRemainingSeconds(duration, 30.0, 2.0), 0.0)
+        }
+        for (position in listOf(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY)) {
+            assertEquals(0.0, playbackRemainingSeconds(120.0, position, 2.0), 0.0)
+        }
+        for (speed in listOf(0.0, -1.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            assertEquals(0.0, playbackRemainingSeconds(120.0, 30.0, speed), 0.0)
+        }
     }
 
     @Test fun mpvSafeOptionsPreserveValuesAndNormalizeKeys() {

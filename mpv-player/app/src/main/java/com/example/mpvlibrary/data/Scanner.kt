@@ -8,6 +8,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import androidx.room.withTransaction
+import com.example.mpvlibrary.mpv.MpvPath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -27,7 +28,7 @@ import kotlin.coroutines.resumeWithException
 
 data class ScanStatus(val running: Boolean, val completed: Boolean, val error: String? = null)
 
-private data class ScannedVideo(val uri: String, val name: String, val dirPath: String, val size: Long, val modified: Long)
+private data class ScannedVideo(val uri: String, val name: String, val dirPath: String, val size: Long, val modified: Long, val hasExternalSubtitles: Boolean = false)
 private class IncompleteScan(message: String) : Exception(message)
 private class CompletedScanAttempt(val treeUri: String)
 
@@ -166,7 +167,7 @@ class LibraryScanner(private val context: Context) {
                         val previous = existing[item.uri]
                         if (previous == null) {
                             additions.add(
-                                VideoEntity(item.uri, folder.id, item.name, item.dirPath, sizeBytes = item.size, lastModified = item.modified),
+                                VideoEntity(item.uri, folder.id, item.name, item.dirPath, sizeBytes = item.size, lastModified = item.modified, hasExternalSubtitles = item.hasExternalSubtitles),
                             )
                             if (additions.size == BATCH_SIZE) {
                                 videos.insertNew(additions)
@@ -177,6 +178,7 @@ class LibraryScanner(private val context: Context) {
                         ) {
                             videos.refreshMetaIfChanged(item.uri, item.name, item.dirPath, item.size, item.modified)
                         }
+                        if (previous != null) videos.updateExternalSubtitles(item.uri, item.hasExternalSubtitles)
                     }
                     if (additions.isNotEmpty()) videos.insertNew(additions)
                     val removals = ArrayList<String>(BATCH_SIZE)
@@ -213,6 +215,8 @@ class LibraryScanner(private val context: Context) {
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(directory))
         val cursor = queryChildren(childrenUri)
             ?: throw IncompleteScan("폴더 목록을 읽을 수 없습니다: $prefix")
+        val siblingNames = ArrayList<String>()
+        val directoryVideos = ArrayList<ScannedVideo>()
         cursor.use {
             currentCoroutineContext().ensureActive()
             if (it.extras.getBoolean(DocumentsContract.EXTRA_LOADING, false)) {
@@ -232,18 +236,25 @@ class LibraryScanner(private val context: Context) {
                 val name = it.getString(nameCol)
                 val mime = it.getString(mimeCol)
                 if (id.isBlank() || name.isBlank()) throw IncompleteScan("잘못된 문서 행")
+                if (mime != DocumentsContract.Document.MIME_TYPE_DIR && name.substringAfterLast('.', "").lowercase() in MpvPath.SUB_EXTS) {
+                    siblingNames.add(name)
+                }
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
                     if (depth >= MAX_SCAN_DEPTH) throw IncompleteScan("폴더 깊이 제한 초과: $prefix/$name")
                     val child = DocumentsContract.buildDocumentUriUsingTree(tree, id)
                     walk(tree, child, if (prefix.isEmpty()) name else "$prefix/$name", depth + 1, found)
                 } else if (isVideo(name)) {
                     val child = DocumentsContract.buildDocumentUriUsingTree(tree, id)
-                    found.add(ScannedVideo(child.toString(), name, prefix, if (it.isNull(sizeCol)) 0 else it.getLong(sizeCol), if (it.isNull(modifiedCol)) 0 else it.getLong(modifiedCol)))
+                    directoryVideos.add(ScannedVideo(child.toString(), name, prefix, if (it.isNull(sizeCol)) 0 else it.getLong(sizeCol), if (it.isNull(modifiedCol)) 0 else it.getLong(modifiedCol)))
                 }
             }
             if (it.extras.getBoolean(DocumentsContract.EXTRA_LOADING, false)) {
                 throw IncompleteScan("폴더 목록을 아직 불러오는 중입니다: $prefix")
             }
+        }
+        for (video in directoryVideos) {
+            currentCoroutineContext().ensureActive()
+            found.add(video.copy(hasExternalSubtitles = siblingNames.isNotEmpty() && MpvPath.matchSubtitles(video.name, siblingNames).isNotEmpty()))
         }
     }
 

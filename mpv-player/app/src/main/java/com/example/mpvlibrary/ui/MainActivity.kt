@@ -47,6 +47,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -737,9 +739,15 @@ fun LibraryScreen(
 
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
+    val context = LocalContext.current
+    LaunchedEffect(v.uri, v.sizeBytes, v.lastModified) {
+        VideoMetadata.ensure(context.applicationContext, v)
+    }
     val watched = v.isWatched(threshold)
+    val rowThumbWidth = adaptiveThumbnailWidth(116.dp)
     Row(
         Modifier
             .fillMaxWidth()
@@ -749,12 +757,12 @@ fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
                 stateDescription = videoPlaybackState(v, threshold)
             }
             .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalAlignment = Alignment.Top,
     ) {
         Thumb(
             video = v,
             modifier = Modifier
-                .size(116.dp, 66.dp)
+                .size(rowThumbWidth, rowThumbWidth * 9f / 16f)
                 .clip(RoundedCornerShape(8.dp)),
             isWatched = watched,
         )
@@ -769,10 +777,13 @@ fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurface,
             )
             Spacer(Modifier.height(4.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            MediaDetails(v)
+            FlowRow(
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 if (v.dirPath.isNotEmpty()) {
                     Text(v.dirPath, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
-                    Text(" · ", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
                 Text(
                     pct(v.fraction) + if (watched) " ✓" else "",
@@ -781,7 +792,8 @@ fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
                     fontWeight = FontWeight.Medium,
                 )
                 if (v.durationSec > 0) {
-                    Text(" · " + fmtTime(v.positionSec), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text(fmtTime(v.positionSec), softWrap = false, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    Text("/ ${fmtTime(v.durationSec)}", softWrap = false, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
             }
         }
@@ -1185,7 +1197,7 @@ fun ContinueWatchingPane(
 
 // ---------------------------------------------------------------- Folder
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun FolderScreen(
     folderId: Long,
@@ -1367,30 +1379,41 @@ fun FolderScreen(
             }
 
             // Search & Filter controls
-            Row(
-                Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            BoxWithConstraints(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             ) {
-                OutlinedTextField(
-                    value = query, onValueChange = { query = it },
-                    placeholder = { Text("파일명 검색") },
-                    singleLine = true, modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(12.dp),
-                    trailingIcon = {
-                        if (query.isNotEmpty()) IconButton(onClick = { query = "" }) {
-                            Icon(Icons.Default.Close, "지우기")
-                        }
-                    },
-                )
-                IconButton(onClick = { sortByName = !sortByName }) {
-                    Icon(if (sortByName) Icons.Default.SortByAlpha else Icons.Default.History, "정렬")
+                val compactControls = maxWidth < 360.dp || maxWidth.value / LocalDensity.current.fontScale < 300f
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    OutlinedTextField(
+                        value = query, onValueChange = { query = it },
+                        placeholder = { Text("파일명 검색", maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) },
+                        singleLine = true,
+                        modifier = (if (compactControls) Modifier.fillMaxWidth() else Modifier.weight(1f))
+                            .align(Alignment.CenterVertically),
+                        shape = RoundedCornerShape(12.dp),
+                        trailingIcon = {
+                            if (query.isNotEmpty()) IconButton(onClick = { query = "" }) {
+                                Icon(Icons.Default.Close, "지우기")
+                            }
+                        },
+                    )
+                    IconButton(
+                        onClick = { sortByName = !sortByName },
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                    ) {
+                        Icon(if (sortByName) Icons.Default.SortByAlpha else Icons.Default.History, "정렬")
+                    }
+                    FilterChip(
+                        selected = unseenOnly, onClick = { unseenOnly = !unseenOnly },
+                        label = { Text("미시청", maxLines = 1, softWrap = false) },
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                        shape = RoundedCornerShape(8.dp),
+                    )
                 }
-                FilterChip(
-                    selected = unseenOnly, onClick = { unseenOnly = !unseenOnly },
-                    label = { Text("미시청") },
-                    shape = RoundedCornerShape(8.dp),
-                )
             }
 
             // Videos: list only.
@@ -1612,7 +1635,7 @@ fun FolderScreen(
 
 }
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun VideoRow(
     v: VideoEntity,
@@ -1626,8 +1649,13 @@ fun VideoRow(
     onActionDelete: (() -> Unit)?,
     thumbWidth: Dp = 116.dp,
 ) {
+    val context = LocalContext.current
+    LaunchedEffect(v.uri, v.sizeBytes, v.lastModified) {
+        VideoMetadata.ensure(context.applicationContext, v)
+    }
     val watched = v.isWatched(threshold)
     val inProgress = v.isInProgress(threshold)
+    val rowThumbWidth = adaptiveThumbnailWidth(thumbWidth)
     var showMenu by remember { mutableStateOf(false) }
 
     val canSwipeDelete = !inSelectionMode && onActionDelete != null
@@ -1693,13 +1721,13 @@ fun VideoRow(
                 }
                 .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
                 .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Top,
         ) {
         // Thumbnail: green top-end badge = watched, blue top-start badge = long-press selected.
         Thumb(
             video = v,
             modifier = Modifier
-                .size(thumbWidth, (thumbWidth.value * 9f / 16f).dp)
+                .size(rowThumbWidth, rowThumbWidth * 9f / 16f)
                 .clip(RoundedCornerShape(8.dp)),
             isWatched = watched,
             isSelected = isSelected,
@@ -1713,33 +1741,36 @@ fun VideoRow(
                 v.name,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = if (inProgress) FontWeight.Bold else FontWeight.SemiBold,
-                maxLines = 3,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
 
             Spacer(Modifier.height(3.dp))
 
-            // Subfolder breadcrumb + File size + Last modified date
-            val metaList = mutableListOf<String>()
-            if (v.dirPath.isNotEmpty()) metaList.add(v.dirPath)
-            val sizeStr = fmtSize(v.sizeBytes)
-            if (sizeStr.isNotEmpty()) metaList.add(sizeStr)
-            val dateStr = fmtDate(v.lastModified)
-            if (dateStr.isNotEmpty()) metaList.add(dateStr)
-
-            if (metaList.isNotEmpty()) {
-                Text(
-                    metaList.joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.Gray,
-                )
+            // Breadcrumbs can wrap; short file metadata remains an atomic chunk.
+            if (v.dirPath.isNotEmpty()) {
+                Text(v.dirPath, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
             }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                val sizeStr = fmtSize(v.sizeBytes)
+                if (sizeStr.isNotEmpty()) {
+                    Text(sizeStr, softWrap = false, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+                val dateStr = fmtDate(v.lastModified)
+                if (dateStr.isNotEmpty()) {
+                    Text(dateStr, softWrap = false, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
+            }
+            MediaDetails(v)
 
             Spacer(Modifier.height(3.dp))
 
             // Progress status badge + Playback timestamp info
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            FlowRow(
+                verticalArrangement = Arrangement.spacedBy(2.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 when {
@@ -1757,12 +1788,22 @@ fun VideoRow(
                 if (v.durationSec > 0) {
                     val posStr = fmtTime(v.positionSec)
                     val durStr = fmtTime(v.durationSec)
-                    val remainStr = if (inProgress) " (-${fmtTime((v.durationSec - v.positionSec).coerceAtLeast(0.0))})" else ""
+                    val remainStr = if (inProgress) "(-${fmtTime((v.durationSec - v.positionSec).coerceAtLeast(0.0))})" else ""
                     Text(
-                        "$posStr / $durStr$remainStr",
+                        posStr,
+                        softWrap = false,
                         style = MaterialTheme.typography.bodySmall,
                         color = Color.Gray,
                     )
+                    Text(
+                        "/ $durStr",
+                        softWrap = false,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray,
+                    )
+                    if (remainStr.isNotEmpty()) {
+                        Text(remainStr, softWrap = false, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                    }
                 }
             }
 
@@ -2774,11 +2815,48 @@ private fun videoPlaybackState(video: VideoEntity, threshold: Double): String = 
     else -> "미시청"
 }
 
+/** Keep the preferred size on roomy screens; reserve text space on narrow/large-font layouts. */
+@Composable
+private fun adaptiveThumbnailWidth(preferred: Dp): Dp {
+    val width = LocalConfiguration.current.screenWidthDp
+    val fontScale = LocalDensity.current.fontScale
+    return if (width < 360 || width / fontScale < 300f) minOf(preferred, 72.dp) else preferred
+}
+
+private fun videoResolution(video: VideoEntity): String =
+    if ((video.videoWidth ?: 0) > 0 && (video.videoHeight ?: 0) > 0) {
+        "${video.videoWidth}×${video.videoHeight}"
+    } else "해상도 미확인"
+
+private fun videoSubtitleLabel(video: VideoEntity): String = when (video.hasSubtitles) {
+    true -> "자막 있음"
+    false -> "자막 없음"
+    null -> "자막 미확인"
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MediaDetails(video: VideoEntity) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Text(videoResolution(video), softWrap = false, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        Text(videoSubtitleLabel(video), softWrap = false, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        if (video.durationSec <= 0) {
+            Text("길이 미확인", softWrap = false, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+        }
+    }
+}
+
 private fun videoAnnouncement(video: VideoEntity): String = buildList {
     add(video.name)
     if (video.dirPath.isNotEmpty()) add(video.dirPath)
     fmtSize(video.sizeBytes).takeIf { it.isNotEmpty() }?.let { add(it) }
     fmtDate(video.lastModified).takeIf { it.isNotEmpty() }?.let { add(it) }
+    add(videoResolution(video))
+    add(videoSubtitleLabel(video))
+    if (video.durationSec <= 0) add("길이 미확인")
     if (video.durationSec > 0) add("${fmtTime(video.positionSec)} / ${fmtTime(video.durationSec)}")
     if (video.lastPlayedAt > 0) {
         add("최근 시청: " + SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date(video.lastPlayedAt)))
