@@ -16,15 +16,20 @@ import kotlinx.coroutines.withContext
 object VideoMetadata {
     private val probeMutex = Mutex()
 
+    /** Serialize retry invalidation with probes so an old failure cannot consume it. */
+    suspend fun retryFailed(context: Context, folderId: Long) = withContext(Dispatchers.IO) {
+        probeMutex.withLock {
+            AppDb.get(context).videos().retryFailedMetadata(folderId)
+        }
+    }
+
     suspend fun ensure(context: Context, video: VideoEntity) = withContext(Dispatchers.IO) {
         if (video.metadataChecked) return@withContext
         probeMutex.withLock {
             currentCoroutineContext().ensureActive()
             val dao = AppDb.get(context).videos()
             val current = dao.byUri(video.uri) ?: return@withLock
-            if (current.metadataChecked || current.sizeBytes != video.sizeBytes ||
-                current.lastModified != video.lastModified
-            ) return@withLock
+            if (!current.needsMetadataProbe(video)) return@withLock
             currentCoroutineContext().ensureActive()
             val result = try {
                 context.contentResolver.openFileDescriptor(Uri.parse(current.uri), "r")?.use {

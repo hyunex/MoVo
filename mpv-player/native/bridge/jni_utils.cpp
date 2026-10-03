@@ -30,13 +30,6 @@ void init_methods_cache(JNIEnv *env)
     java_Boolean = FIND_CLASS("java/lang/Boolean");
     java_Boolean_init = env->GetMethodID(java_Boolean, "<init>", "(Z)V");
 
-    android_graphics_Bitmap = FIND_CLASS("android/graphics/Bitmap");
-    // createBitmap(int[], int, int, android.graphics.Bitmap$Config)
-    android_graphics_Bitmap_createBitmap = env->GetStaticMethodID(android_graphics_Bitmap, "createBitmap", "([IIILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
-    android_graphics_Bitmap_Config = FIND_CLASS("android/graphics/Bitmap$Config");
-    // static final android.graphics.Bitmap$Config ARGB_8888
-    android_graphics_Bitmap_Config_ARGB_8888 = env->GetStaticFieldID(android_graphics_Bitmap_Config, "ARGB_8888", "Landroid/graphics/Bitmap$Config;");
-
     mpv_MPVLib = FIND_CLASS("is/xyz/mpv/MPVLib");
     mpv_MPVLib_eventProperty_S  = env->GetStaticMethodID(mpv_MPVLib, "eventProperty", "(Ljava/lang/String;)V"); // eventProperty(String)
     mpv_MPVLib_eventProperty_Sb = env->GetStaticMethodID(mpv_MPVLib, "eventProperty", "(Ljava/lang/String;Z)V"); // eventProperty(String, boolean)

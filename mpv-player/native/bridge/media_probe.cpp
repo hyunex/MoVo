@@ -113,11 +113,15 @@ extern "C" jni_func(jlongArray, probeMedia, jint fd) {
     probe.format->probesize = 8 * 1024 * 1024;
     probe.format->max_analyze_duration = 3 * AV_TIME_BASE;
     if (avformat_open_input(&probe.format, nullptr, nullptr, nullptr) < 0 ||
-        avformat_find_stream_info(probe.format, nullptr) < 0 || probe.expired()) {
+        probe.expired()) {
         return nullptr;
     }
     // Dynamic-stream containers cannot establish subtitle absence from a
-    // bounded probe. Preserve unknown rather than claiming an incomplete list.
+    // bounded probe. Reject them before opening decoders for stream analysis.
+    if (probe.format->ctx_flags & AVFMTCTX_NOHEADER) return nullptr;
+    if (avformat_find_stream_info(probe.format, nullptr) < 0 || probe.expired()) {
+        return nullptr;
+    }
     if (probe.format->ctx_flags & AVFMTCTX_NOHEADER) return nullptr;
 
     jlong values[4] = {-1, 0, 0, 0};

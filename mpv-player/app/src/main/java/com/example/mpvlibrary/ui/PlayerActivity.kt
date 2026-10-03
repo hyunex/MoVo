@@ -44,6 +44,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +53,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -62,6 +66,7 @@ import androidx.lifecycle.lifecycleScope
 import com.example.mpvlibrary.data.AppDb
 import com.example.mpvlibrary.data.AppLog
 import com.example.mpvlibrary.data.LibraryWork
+import com.example.mpvlibrary.data.PlayerPlaylistStore
 import com.example.mpvlibrary.data.SettingsRepo
 import com.example.mpvlibrary.mpv.MPVPlayerView
 import com.example.mpvlibrary.mpv.MpvPath
@@ -139,18 +144,91 @@ fun playbackRemainingSeconds(duration: Double, position: Double, effectiveSpeed:
     return if (remaining.isFinite()) remaining else 0.0
 }
 
+/** Recreation is a continuation, unlike opening a library item using its resume threshold. */
+fun playbackResumePosition(restart: Boolean, sessionPosition: Double?, libraryPosition: Double, libraryWatched: Boolean): Double {
+    if (restart) return 0.0
+    if (sessionPosition != null && sessionPosition.isFinite() && sessionPosition >= 0) return sessionPosition
+    return libraryPosition.takeIf { it.isFinite() && it > 5 && !libraryWatched } ?: 0.0
+}
+
+/** User intent and audio ownership are independent of the engine's pause property. */
+class PlaybackIntent {
+    var wantsPlay = true
+        private set
+    var foreground = false
+        private set
+    var hasFocus = false
+        private set
+    val canPlay: Boolean get() = wantsPlay && foreground && hasFocus
+    fun play() { wantsPlay = true }
+    fun pause() { wantsPlay = false }
+    fun foreground(value: Boolean) { foreground = value }
+    fun focus(gained: Boolean, permanentLoss: Boolean = false) {
+        hasFocus = gained
+        if (permanentLoss) wantsPlay = false
+    }
+}
+
+/** A requested seek remains authoritative until a matching native sample arrives. */
+class RequestedSeek(private val clock: () -> Long = System::nanoTime) {
+    var target: Double? = null
+        private set
+    private var requestedAt = 0L
+    fun request(position: Double) {
+        target = position
+        requestedAt = clock()
+    }
+    fun reset() { target = null }
+    fun sample(position: Double): Double = target ?: position
+    fun confirm(position: Double, effectiveSpeed: Double = 1.0): Double {
+        val requested = target ?: return position
+        val elapsed = ((clock() - requestedAt).coerceAtLeast(0) / 1_000_000_000.0)
+        val drift = maxOf(2.0, elapsed * effectiveSpeed.coerceAtLeast(0.0) + 0.25)
+        if (position.isFinite() && position >= requested - 0.05 && position <= requested + drift) {
+            target = null
+            return position
+        }
+        return requested
+    }
+}
+
 class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObserver {
 
     companion object {
         private const val TAG = "mpv"
-        const val EXTRA_URIS = "uris"
+        private const val EXTRA_PLAYLIST = "playlist"
         const val EXTRA_INDEX = "index"
 
         fun start(context: Context, uris: List<String>, index: Int) {
-            val i = Intent(context, PlayerActivity::class.java)
-            i.putStringArrayListExtra(EXTRA_URIS, ArrayList(uris))
-            i.putExtra(EXTRA_INDEX, index)
-            context.startActivity(i)
+            val application = context.applicationContext
+            LibraryWork.scope.launch {
+                val store = PlayerPlaylistStore(application.filesDir.resolve("player-playlists"))
+                var token: String? = null
+                try {
+                    val saved = store.save(uris)
+                    token = saved
+                    val i = Intent(context, PlayerActivity::class.java)
+                    i.putExtra(EXTRA_PLAYLIST, saved)
+                    i.putExtra(EXTRA_INDEX, index)
+                    withContext(Dispatchers.Main) {
+                        if (context is android.app.Activity && (context.isFinishing || context.isDestroyed)) {
+                            store.remove(saved)
+                        } else {
+                            if (context !is android.app.Activity) i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(i)
+                        }
+                    }
+                } catch (e: Exception) {
+                    token?.let { saved ->
+                        runCatching { store.remove(saved) }
+                            .onFailure { AppLog.w(TAG, "playlist launch cleanup failed: ${it.message}") }
+                    }
+                    AppLog.e(TAG, "playlist launch failed: $e")
+                    withContext(Dispatchers.Main) {
+                        android.widget.Toast.makeText(application, "재생 목록을 열 수 없습니다", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
         }
     }
 
@@ -161,6 +239,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var playerView: MPVPlayerView? = null
     private var playable: MpvPath.Playable? = null
     private var uris: ArrayList<String> = arrayListOf()
+    private var playlistToken: String? = null
     private var index by mutableIntStateOf(0)
     private var currentUri: String? = null
     private var sourceNote: String = ""
@@ -195,12 +274,17 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var lastBrightness = -1f
     private var autoSubDoneIndex = -1
     private var subPlayables = mutableListOf<MpvPath.Playable>()
+    private val externalSubtitleUris = arrayListOf<String>()
     private var noisyReceiver: android.content.BroadcastReceiver? = null
 
     // Bluetooth / Car AV MediaSession & AudioFocus
     private var mediaSession: MediaSession? = null
     private var audioFocusRequest: AudioFocusRequest? = null
-    private var resumeOnFocusGain = false
+    private val playbackIntent = PlaybackIntent()
+    private val requestedSeek = RequestedSeek()
+    private var restoredSession: Bundle? = null
+    private var restoredPlaybackUi: Bundle? = null
+    private var fastPlayHeld = false
 
     // UI & Gesture controls
     private var controlsVisible by mutableStateOf(true)
@@ -210,6 +294,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var currentAspectMode by mutableStateOf(AspectRatioMode.BEST_FIT)
     private var autoRotate by mutableStateOf(true)
     private var controlsTimerJob: Job? = null
+    private var gestureEpoch by mutableIntStateOf(0)
 
     // Dialog states
     private var showSpeedDialog by mutableStateOf(false)
@@ -254,14 +339,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         WindowCompat.setDecorFitsSystemWindows(window, false)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
         AppLog.install(this)
-        AppLog.i(TAG, "PlayerActivity created (items=${intent.getStringArrayListExtra(EXTRA_URIS)?.size ?: 0})")
-        index = intent.getIntExtra(EXTRA_INDEX, 0)
+        AppLog.i(TAG, "PlayerActivity created")
         // P0: pause when headphones disconnect
         noisyReceiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
                 if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && !isPaused && initialized && !isFinishing) {
                     AppLog.i(TAG, "headset disconnected — auto pause")
-                    togglePlayPause()
+                    setUserPlayback(false)
                 }
             }
         }
@@ -278,21 +362,50 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
 
         settings = SettingsRepo(this)
-        // 외부 Intent 경계값 방어: 빈 목록/음수/초과 인덱스는 0으로 정규화.
-        uris = (intent.getStringArrayListExtra(EXTRA_URIS) ?: arrayListOf())
-            .filter { it.isNotBlank() }.take(500).let { ArrayList(it) }
-        index = intent.getIntExtra(EXTRA_INDEX, 0).coerceIn(0, maxOf(0, uris.size - 1))
+        playlistToken = intent.getStringExtra(EXTRA_PLAYLIST)
+        restoredSession = savedInstanceState
+        index = savedInstanceState?.getInt("session.index") ?: intent.getIntExtra(EXTRA_INDEX, 0)
+        savedInstanceState?.let {
+            if (!it.getBoolean("session.play", true)) playbackIntent.pause()
+            controlsVisible = it.getBoolean("session.controls", true)
+            isLocked = it.getBoolean("session.locked", false)
+            autoRotate = it.getBoolean("session.rotate", true)
+            currentAspectMode = AspectRatioMode.entries.getOrNull(it.getInt("session.aspect")) ?: AspectRatioMode.BEST_FIT
+            requestedOrientation = if (autoRotate) ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+                else it.getInt("session.orientation", ActivityInfo.SCREEN_ORIENTATION_LOCKED)
+            showSpeedDialog = it.getBoolean("session.speedDialog")
+            showAudioDialog = it.getBoolean("session.audioDialog")
+            showSubDialog = it.getBoolean("session.subDialog")
+        }
+        lifecycleScope.launch {
+            try {
+                uris = withContext(Dispatchers.IO) {
+                    PlayerPlaylistStore(filesDir.resolve("player-playlists")).load(checkNotNull(playlistToken))
+                }
+                finishCreate()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                fail("재생 목록을 열 수 없습니다: ${e.message}")
+                android.widget.Toast.makeText(this@PlayerActivity, "재생 목록을 열 수 없습니다", android.widget.Toast.LENGTH_LONG).show()
+                finish()
+            }
+        }
+    }
+
+    private fun finishCreate() {
+        index = index.coerceIn(0, maxOf(0, uris.size - 1))
         if (uris.isEmpty()) {
             fail("재생할 영상이 없음")
             finish()
             return
         }
         initMediaSession()
-        requestAudioFocus()
+        if (playbackIntent.wantsPlay && playbackIntent.foreground && !playbackIntent.hasFocus) requestAudioFocus()
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                var showTitleDialog by remember { mutableStateOf(false) }
+                var showTitleDialog by rememberSaveable { mutableStateOf(false) }
                 LaunchedEffect(controlsVisible, isLocked) { updateSystemBars() }
                 // External subtitle file picker launcher
                 val subPicker = rememberLauncherForActivityResult(
@@ -302,22 +415,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         try {
                             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                         } catch (_: Exception) {}
-                        val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(this@PlayerActivity, uri)?.name ?: "sub.srt"
-                        val cached = MpvPath.cacheCopy(this@PlayerActivity, uri, name)
-                        if (cached != null) {
-                            mpv("외부 자막 추가") {
-                                MPVLib.command(arrayOf("sub-add", cached.absolutePath, "select"))
-                                refreshTracks()
-                                showHud(HudMode.ASPECT, "외부 자막 추가됨")
-                            }
-                        } else {
-                            val subPlayable = MpvPath.open(this@PlayerActivity, uri)
-                            subPlayables += subPlayable
-                            mpv("외부 자막 추가") {
-                                MPVLib.command(arrayOf("sub-add", subPlayable.path, "select"))
-                                refreshTracks()
-                                showHud(HudMode.ASPECT, "외부 자막 추가됨")
-                            }
+                        val generation = loadGeneration
+                        lifecycleScope.launch {
+                            addExternalSubtitle(uri, generation)
                         }
                     }
                 }
@@ -556,9 +656,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     SettingsRepo.DEFAULT_SPEED_STEP
                 }
             }
-            speed = settings.defaultSpeed.first().coerceIn(0.1, 5.0)
+            speed = (restoredSession?.getDouble("session.speed") ?: settings.defaultSpeed.first()).coerceIn(0.1, 5.0)
             preFastPlaySpeed = speed
             mpv("speed=$speed") { MPVLib.setPropertyDouble("speed", speed) }
+            mpv("restore aspect") { applyAspectRatio(currentAspectMode) }
             lifecycleScope.launch {
                 settings.speedStep.collect { step ->
                     if (step.isFinite() && step in 0.01..1.0) {
@@ -608,9 +709,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         val src = loadSource(index, generation) ?: return
         if (generation != loadGeneration || destroyed) return
         loadSubmitted = true
+        applyPlaybackGate()
         view.playFile(src.path)
-        mpv("unpause on start") { MPVLib.setPropertyBoolean("pause", false) }
-        isPaused = false
         updateMediaSessionMetadata()
         updateMediaSessionState()
     }
@@ -628,7 +728,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         if (generation != loadGeneration || destroyed) return null
         val title = entity?.name ?: Uri.parse(uriStr).lastPathSegment ?: "동영상"
         val threshold = settings.watchedThreshold.first()
-        val resume = if (restart) 0.0 else entity?.positionSec?.takeIf { it > 5 && !entity.isWatched(threshold) } ?: 0.0
+        val session = restoredSession?.takeIf { it.getString("session.uri") == uriStr }
+        val resume = playbackResumePosition(restart, session?.getDouble("session.position"),
+            entity?.positionSec ?: 0.0, entity?.isWatched(threshold) ?: false)
         var resolved: MpvPath.Playable? = null
         val next = try {
             withContext(Dispatchers.IO) {
@@ -661,7 +763,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         videoTitle = title
         position = resume
         lastPosition = resume
-        lastDuration = 0.0
+        lastDuration = session?.getDouble("session.duration")?.takeIf { it.isFinite() && it > 0 }
+            ?: entity?.durationSec?.takeIf { it.isFinite() && it > 0 } ?: 0.0
+        duration = lastDuration
+        requestedSeek.reset()
+        restoredPlaybackUi = session
+        externalSubtitleUris.clear()
+        restoredSession = null
         loadedEntryUri = uriStr
         mpv("이어보기 start=$resume") {
             MPVLib.setOptionString("start", if (resume > 0) resume.toString() else "0")
@@ -680,19 +788,21 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     val entry = activeEntryId
                     if (!destroyed && entry != null && !loadPending && loadedEntryUri == currentUri) {
                         val engineEntry = engineEntryId()
-                        val pos = MPVLib.getPropertyDouble("time-pos") ?: continue
-                        val dur = MPVLib.getPropertyDouble("duration") ?: 0.0
+                        val nativePosition = MPVLib.getPropertyDouble("time-pos") ?: continue
+                        if (!nativePosition.isFinite() || nativePosition < 0) continue
+                        var pos = nativePosition
+                        val dur = MPVLib.getPropertyDouble("duration")?.takeIf { it.isFinite() && it > 0 } ?: lastDuration
                         if (engineEntry == entry && engineEntryId() == entry) {
+                            pos = requestedSeek.sample(nativePosition)
                             if (!isScrubbing) {
                                 position = pos
                                 duration = dur
                             }
-                            if (pos.isFinite() && pos >= 0 && dur.isFinite() && dur > 0) {
-                                lastPosition = pos
-                                lastDuration = dur
-                            }
+                            lastPosition = pos
+                            if (dur.isFinite() && dur > 0) lastDuration = dur
                             val pausedProp = MPVLib.getPropertyBoolean("pause")
                             if (pausedProp != null) isPaused = pausedProp
+                            if (!playbackIntent.canPlay && !isPaused) applyPlaybackGate()
                             if (++tick % 3 == 0) refreshTracks()
                             if (tick % 5 == 0) persistProgress(pos, dur, currentUri)
                         }
@@ -731,21 +841,44 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         return list
     }
 
-    private fun persistProgress(pos: Double, dur: Double, uri: String?) {
-        if (uri == null || dur <= 0 || pos < 0 || !pos.isFinite() || !dur.isFinite()) return
-        val now = System.currentTimeMillis()
-        LibraryWork.saveProgress(applicationContext, uri, pos, dur, now)
+    private fun persistProgress(pos: Double, dur: Double, uri: String?, completed: Boolean = false) {
+        if (uri == null || pos < 0 || !pos.isFinite() || !dur.isFinite()) return
+        LibraryWork.saveProgress(applicationContext, uri, pos, dur.coerceAtLeast(0.0), System.currentTimeMillis(), completed)
+    }
+
+    private fun applyPlaybackGate() {
+        isPaused = !playbackIntent.canPlay
+        if (initialized) mpv(if (isPaused) "일시정지" else "재생") {
+            MPVLib.setPropertyBoolean("pause", isPaused)
+        }
+        updateMediaSessionState()
+    }
+
+    private fun setUserPlayback(play: Boolean) {
+        if (play) {
+            playbackIntent.play()
+            if (!playbackIntent.hasFocus) requestAudioFocus()
+        } else {
+            playbackIntent.pause()
+            restoreHeldSpeed()
+        }
+        applyPlaybackGate()
     }
 
     private fun togglePlayPause() {
-        val next = !isPaused
-        isPaused = next
-        mpv(if (next) "일시정지" else "재생") {
-            MPVLib.setPropertyBoolean("pause", next)
-        }
-        showHud(HudMode.PLAY_PAUSE, if (next) "⏸ 일시정지" else "▶ 재생")
-        updateMediaSessionState()
+        setUserPlayback(if (playbackIntent.wantsPlay && !playbackIntent.hasFocus) false else isPaused)
+        showHud(HudMode.PLAY_PAUSE, if (isPaused) "⏸ 일시정지" else "▶ 재생")
         resetControlsTimer()
+    }
+
+    private fun seekTo(target: Double) {
+        if (!target.isFinite() || target < 0 || loadPending) return
+        mpv("seek absolute $target") {
+            MPVLib.command(arrayOf("seek", target.toString(), "absolute+exact"))
+            requestedSeek.request(target)
+            position = target
+            lastPosition = target
+        }
     }
 
     private fun captureCurrentProgress(completed: Boolean = false) {
@@ -761,7 +894,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 val pos = MPVLib.getPropertyDouble("time-pos")
                 val dur = MPVLib.getPropertyDouble("duration")
                 if (engineEntryId() == entry) {
-                    if (pos != null && pos.isFinite() && pos >= 0) lastPosition = pos
+                    if (pos != null && pos.isFinite() && pos >= 0) lastPosition = requestedSeek.sample(pos)
                     if (dur != null && dur.isFinite() && dur > 0) lastDuration = dur
                 }
             }
@@ -771,7 +904,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             position = lastPosition
             duration = lastDuration
         }
-        persistProgress(lastPosition, lastDuration, uri)
+        persistProgress(lastPosition, lastDuration, uri, completed)
     }
 
     private fun advance() {
@@ -813,9 +946,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 return@launch
             }
             loadSubmitted = true
+            applyPlaybackGate()
             v.playFile(src.path)
-            mpv("unpause on selection") { MPVLib.setPropertyBoolean("pause", false) }
-            isPaused = false
             updateMediaSessionMetadata()
             updateMediaSessionState()
         }
@@ -823,13 +955,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     private fun previous() {
         if (position > 3.0) {
-            mpv("처음으로 이동") {
-                MPVLib.command(arrayOf("seek", "0", "absolute"))
-                MPVLib.setPropertyBoolean("pause", false)
-                position = 0.0
-                lastPosition = 0.0
-                isPaused = false
-            }
+            seekTo(0.0)
+            setUserPlayback(true)
             showHud(HudMode.SEEK, "처음부터 재생 (0:00)")
             updateMediaSessionState()
         } else if (index > 0) {
@@ -847,21 +974,21 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             override fun onPlay() {
                 AppLog.i(TAG, "MediaSession: onPlay (Bluetooth/Car command)")
                 runOnUiThread {
-                    if (isPaused) togglePlayPause()
+                    setUserPlayback(true)
                 }
             }
 
             override fun onPause() {
                 AppLog.i(TAG, "MediaSession: onPause (Bluetooth/Car command)")
                 runOnUiThread {
-                    if (!isPaused) togglePlayPause()
+                    setUserPlayback(false)
                 }
             }
 
             override fun onStop() {
                 AppLog.i(TAG, "MediaSession: onStop (Bluetooth/Car power off/stop)")
                 runOnUiThread {
-                    if (!isPaused) togglePlayPause()
+                    setUserPlayback(false)
                 }
             }
 
@@ -879,11 +1006,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 val sec = (pos / 1000.0).coerceIn(0.0, duration.coerceAtLeast(1.0))
                 AppLog.i(TAG, "MediaSession: onSeekTo $sec")
                 runOnUiThread {
-                    mpv("seek mediaSession $sec") {
-                        MPVLib.command(arrayOf("seek", sec.toString(), "absolute"))
-                        position = sec
-                        lastPosition = sec
-                    }
+                    seekTo(sec)
                     updateMediaSessionState()
                 }
             }
@@ -901,59 +1024,25 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun requestAudioFocus(): Boolean {
-        val playbackAttributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_MEDIA)
-            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-            .build()
-
-        val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-            .setAudioAttributes(playbackAttributes)
+        val focusRequest = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE).build())
             .setAcceptsDelayedFocusGain(true)
-            .setOnAudioFocusChangeListener { focusChange ->
-                when (focusChange) {
-                    AudioManager.AUDIOFOCUS_LOSS -> {
-                        AppLog.i(TAG, "AudioFocus LOSS -> pause (Car AV off / other audio start)")
-                        runOnUiThread {
-                            resumeOnFocusGain = false
-                            if (!isPaused && initialized) {
-                                togglePlayPause()
-                            }
-                        }
-                    }
-                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                        AppLog.i(TAG, "AudioFocus LOSS_TRANSIENT -> pause (phone call / speech)")
-                        runOnUiThread {
-                            if (!isPaused && initialized) {
-                                resumeOnFocusGain = true
-                                togglePlayPause()
-                            }
-                        }
-                    }
-                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                        AppLog.i(TAG, "AudioFocus LOSS_TRANSIENT_CAN_DUCK -> pause")
-                        runOnUiThread {
-                            if (!isPaused && initialized) {
-                                resumeOnFocusGain = true
-                                togglePlayPause()
-                            }
-                        }
-                    }
-                    AudioManager.AUDIOFOCUS_GAIN -> {
-                        AppLog.i(TAG, "AudioFocus GAIN -> resume=$resumeOnFocusGain")
-                        runOnUiThread {
-                            if (resumeOnFocusGain && isPaused && initialized) {
-                                resumeOnFocusGain = false
-                                togglePlayPause()
-                            }
-                        }
-                    }
+            .setOnAudioFocusChangeListener { change ->
+                runOnUiThread {
+                    if (destroyed) return@runOnUiThread
+                    playbackIntent.focus(change == AudioManager.AUDIOFOCUS_GAIN,
+                        permanentLoss = change == AudioManager.AUDIOFOCUS_LOSS)
+                    if (change != AudioManager.AUDIOFOCUS_GAIN) restoreHeldSpeed()
+                    applyPlaybackGate()
                 }
-            }
-            .build()
-
-        val res = audioManager.requestAudioFocus(focusRequest)
-        audioFocusRequest = focusRequest
-        return res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            }.build().also { audioFocusRequest = it }
+        val result = audioManager.requestAudioFocus(focusRequest)
+        val granted = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        playbackIntent.focus(granted)
+        if (result == AudioManager.AUDIOFOCUS_REQUEST_FAILED) playbackIntent.pause()
+        return granted
     }
 
     private fun abandonAudioFocus() {
@@ -998,11 +1087,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private fun seekRelative(deltaSec: Double) {
         val maxTarget = if (duration > 0) (duration - 0.5).coerceAtLeast(0.0) else 0.0
         val target = if (duration > 0) (position + deltaSec).coerceIn(0.0, maxTarget) else (position + deltaSec).coerceAtLeast(0.0)
-        mpv("seek absolute $target") {
-            MPVLib.command(arrayOf("seek", target.toString(), "absolute"))
-            position = target
-            lastPosition = target
-        }
+        seekTo(target)
         showHud(HudMode.DOUBLE_TAP, if (deltaSec >= 0) "⏩ +${deltaSec.toInt()}초" else "⏪ ${deltaSec.toInt()}초")
         resetControlsTimer()
     }
@@ -1012,6 +1097,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         val nextIndex = (modes.indexOf(currentAspectMode) + 1) % modes.size
         val next = modes[nextIndex]
         currentAspectMode = next
+        mpv("aspect ratio") { applyAspectRatio(next) }
+        showHud(HudMode.ASPECT, next.title)
+        resetControlsTimer()
+    }
+
+    private fun applyAspectRatio(next: AspectRatioMode) {
         when (next) {
             AspectRatioMode.BEST_FIT -> {
                 MPVLib.setPropertyString("video-aspect-override", "-1")
@@ -1050,8 +1141,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 MPVLib.setPropertyString("keepaspect", "yes")
             }
         }
-        showHud(HudMode.ASPECT, next.title)
-        resetControlsTimer()
     }
 
     private fun toggleAutoRotate() {
@@ -1134,7 +1223,57 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         resetControlsTimer()
     }
 
-    // P0: auto-load same-basename external subtitles from the video folder
+    private suspend fun addExternalSubtitle(uri: Uri, generation: Long) {
+        var opened: MpvPath.Playable? = null
+        try {
+            val path = withContext(Dispatchers.IO) {
+                val name = androidx.documentfile.provider.DocumentFile.fromSingleUri(this@PlayerActivity, uri)?.name ?: "sub.srt"
+                MpvPath.cacheCopy(this@PlayerActivity, uri, name)?.absolutePath
+                    ?: MpvPath.open(this@PlayerActivity, uri).also { opened = it }.path
+            }
+            withContext(Dispatchers.Main) {
+                if (destroyed || generation != loadGeneration || loadPending) return@withContext
+                mpv("외부 자막 추가") {
+                    MPVLib.command(arrayOf("sub-add", path, "select"))
+                    opened?.let { subPlayables += it; opened = null }
+                    externalSubtitleUris += uri.toString()
+                    refreshTracks()
+                    showHud(HudMode.ASPECT, "외부 자막 추가됨")
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AppLog.w(TAG, "external subtitle failed: ${e.message}")
+        } finally {
+            opened?.close()
+        }
+    }
+
+    private suspend fun restorePlaybackUi(generation: Long) {
+        val state = withContext(Dispatchers.Main) {
+            restoredPlaybackUi?.takeIf { !destroyed && generation == loadGeneration && !loadPending }
+        } ?: return
+        for (uri in state.getStringArrayList("session.externalSubs").orEmpty()) {
+            addExternalSubtitle(Uri.parse(uri), generation)
+        }
+        withContext(Dispatchers.Main) {
+            if (destroyed || generation != loadGeneration || loadPending) return@withContext
+            for (property in arrayOf("aid", "sid", "sub-delay", "audio-delay", "video-zoom")) {
+                state.getString("session.$property")?.let { value ->
+                    mpv("restore $property") { MPVLib.setPropertyString(property, value) }
+                }
+            }
+            if (state.containsKey("session.brightness")) {
+                lastBrightness = state.getFloat("session.brightness")
+                window.attributes = window.attributes.apply { screenBrightness = lastBrightness }
+            }
+            restoredPlaybackUi = null
+            refreshTracks()
+        }
+    }
+
+    // Auto-load same-basename external subtitles from the video folder.
     private fun autoLoadSubtitles() {
         val uriStr = currentUri ?: return
         val generation = loadGeneration
@@ -1170,8 +1309,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     refreshTracks()
                     showHud(HudMode.ASPECT, "외부 자막 ${matches.size}개 자동 로드")
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLog.w(TAG, "auto-sub failed: ${e.message}")
+            } finally {
+                restorePlaybackUi(generation)
             }
         }
     }
@@ -1191,7 +1334,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(isLocked, tapSeekSec, fastSpeedSetting) {
+                .pointerInput(isLocked, tapSeekSec, fastSpeedSetting, gestureEpoch) {
                     if (isLocked) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = true)
@@ -1213,8 +1356,23 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         var isFastPlay = false
                         var initialPinchDist = 0f
 
+                        try {
                         while (true) {
-                            val event = awaitPointerEvent()
+                            val event = if (!gestureDetermined) {
+                                val remaining = (500 - (System.currentTimeMillis() - downTime)).coerceAtLeast(1)
+                                withTimeoutOrNull(remaining) { awaitPointerEvent() }
+                            } else awaitPointerEvent()
+                            if (event == null) {
+                                gestureDetermined = true
+                                isFastPlay = true
+                                preFastPlaySpeed = speed
+                                fastPlayHeld = true
+                                val fs = fastSpeedSetting
+                                mpv("held fast speed") { MPVLib.setPropertyDouble("speed", fs) }
+                                speed = fs
+                                showHud(HudMode.FAST_PLAY, "⚡ ${SettingsRepo.formatSpeed(fs)} 쾌속 재생 중", autoDismiss = false)
+                                continue
+                            }
                             val pressed = event.changes.filter { it.pressed }
                             if (pressed.isEmpty()) break
 
@@ -1246,7 +1404,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             val dist = kotlin.math.hypot(dx, dy)
 
                             if (!gestureDetermined) {
-                                val elapsed = System.currentTimeMillis() - downTime
                                 if (dist > 18f) {
                                     gestureDetermined = true
                                     if (abs(dx) > abs(dy) * 1.2f) {
@@ -1258,15 +1415,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                             isVolume = true
                                         }
                                     }
-                                } else if (elapsed > 500) {
-                                    // VLC Fast Play on Long Press
-                                    gestureDetermined = true
-                                    isFastPlay = true
-                                    preFastPlaySpeed = speed
-                                    val fs = fastSpeedSetting
-                                    MPVLib.setPropertyDouble("speed", fs)
-                                    speed = fs
-                                    showHud(HudMode.FAST_PLAY, "⚡ ${SettingsRepo.formatSpeed(fs)} 쾌속 재생 중", autoDismiss = false)
                                 }
                             }
 
@@ -1303,17 +1451,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         }
 
                         // On touch release
-                        if (isSeek) {
-                            mpv("seek absolute $currentSeekTarget") {
-                                MPVLib.command(arrayOf("seek", currentSeekTarget.toString(), "absolute"))
-                                position = currentSeekTarget
-                                lastPosition = currentSeekTarget
-                            }
+                        if (isSeek && playbackIntent.foreground) {
+                            seekTo(currentSeekTarget)
                             showHud(HudMode.SEEK, "이동: ${fmt(currentSeekTarget)}")
                         } else if (isFastPlay) {
-                            MPVLib.setPropertyDouble("speed", preFastPlaySpeed)
-                            speed = preFastPlaySpeed
-                            showHud(HudMode.NONE, "")
+                            restoreHeldSpeed()
                         } else if (isPinch || isBrightness || isVolume) {
                             if (isBrightness && lastBrightness > 0) {
                                 val b = lastBrightness.toDouble()
@@ -1344,6 +1486,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                     resetControlsTimer()
                                 }
                             }
+                        }
+                        } finally {
+                            if (isFastPlay) restoreHeldSpeed()
                         }
                     }
                 }
@@ -1603,15 +1748,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         isScrubbing = false
                         val maxTarget = if (duration > 0) (duration - 0.5).coerceAtLeast(0.0) else 0.0
                         val target = scrubPosition.coerceIn(0.0, maxTarget)
-                        mpv("seek absolute $target") {
-                            MPVLib.command(arrayOf("seek", target.toString(), "absolute"))
-                            position = target
-                            lastPosition = target
-                        }
+                        seekTo(target)
                         resetControlsTimer()
                     },
                     valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
-                    modifier = Modifier.fillMaxWidth().height(36.dp),
+                    modifier = Modifier.fillMaxWidth().semantics {
+                        contentDescription = "재생 위치"
+                        stateDescription = "현재 ${fmt(if (isScrubbing) scrubPosition else position)}, 전체 ${fmt(duration)}"
+                    }.heightIn(min = 48.dp),
                     colors = sliderColors,
                     track = { sliderState ->
                         SliderDefaults.Track(
@@ -1621,11 +1765,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         )
                     },
                     thumb = {
-                        SliderDefaults.Thumb(
-                            interactionSource = remember { MutableInteractionSource() },
-                            modifier = Modifier.size(20.dp),
-                            colors = sliderColors,
-                        )
+                        // Slider measures its semantic height from the thumb, not outer padding.
+                        Box(Modifier.size(width = 20.dp, height = 48.dp), contentAlignment = Alignment.Center) {
+                            SliderDefaults.Thumb(
+                                interactionSource = remember { MutableInteractionSource() },
+                                modifier = Modifier.size(20.dp),
+                                colors = sliderColors,
+                            )
+                        }
                     },
                 )
 
@@ -2246,11 +2393,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_PLAY -> {
-                    if (isPaused) togglePlayPause()
+                    setUserPlayback(true)
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                    if (!isPaused) togglePlayPause()
+                    setUserPlayback(false)
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_NEXT -> {
@@ -2303,11 +2450,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             when (playbackEndAction(reason, error, playlistEntryId, endingEntry, repeatOne, autoAdvance && index < uris.size - 1)) {
                 PlaybackEndAction.REPEAT -> beginManualSwitch(index, restart = true)
                 PlaybackEndAction.ADVANCE -> advance()
-                PlaybackEndAction.PAUSE -> {
-                    isPaused = true
-                    updateMediaSessionState()
+                PlaybackEndAction.PAUSE -> setUserPlayback(false)
+                PlaybackEndAction.ERROR -> {
+                    setUserPlayback(false)
+                    fail("재생 오류 (error=$error)")
                 }
-                PlaybackEndAction.ERROR -> fail("재생 오류 (error=$error)")
                 PlaybackEndAction.IGNORE -> Unit
             }
         }
@@ -2315,7 +2462,18 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     override fun event(eventId: Int) {
         if (destroyed) return
-        if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
+        if (eventId == MPVLib.MpvEvent.MPV_EVENT_PLAYBACK_RESTART) {
+            val generation = loadGeneration
+            runOnUiThread {
+                val entry = activeEntryId
+                if (destroyed || generation != loadGeneration || loadPending || entry == null || engineEntryId() != entry) return@runOnUiThread
+                val nativePosition = MPVLib.getPropertyDouble("time-pos") ?: return@runOnUiThread
+                if (nativePosition.isFinite() && nativePosition >= 0 && engineEntryId() == entry) {
+                    lastPosition = requestedSeek.confirm(nativePosition, if (isPaused) 0.0 else speed)
+                    position = lastPosition
+                }
+            }
+        } else if (eventId == MPVLib.MpvEvent.MPV_EVENT_FILE_LOADED) {
             runOnUiThread {
                 if (destroyed || isFinishing || loadPending || engineEntryId() != activeEntryId) return@runOnUiThread
                 val loadedDuration = MPVLib.getPropertyDouble("duration")
@@ -2352,6 +2510,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     override fun onResume() {
         super.onResume()
+        playbackIntent.foreground(true)
+        if (playbackIntent.wantsPlay && !playbackIntent.hasFocus) requestAudioFocus()
+        applyPlaybackGate()
         updateSystemBars()
     }
 
@@ -2360,10 +2521,55 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         if (hasFocus) updateSystemBars()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        captureCurrentProgress()
+        restoredSession?.let { outState.putAll(it) }
+        restoredPlaybackUi?.let { outState.putAll(it) }
+        outState.putInt("session.index", index)
+        if (currentUri != null) {
+            outState.putString("session.uri", currentUri)
+            outState.putDouble("session.position", lastPosition)
+            outState.putDouble("session.duration", lastDuration)
+        }
+        outState.putBoolean("session.play", playbackIntent.wantsPlay)
+        outState.putBoolean("session.controls", controlsVisible)
+        outState.putBoolean("session.locked", isLocked)
+        outState.putBoolean("session.rotate", autoRotate)
+        outState.putInt("session.orientation", requestedOrientation)
+        outState.putInt("session.aspect", currentAspectMode.ordinal)
+        outState.putDouble("session.speed", if (fastPlayHeld) preFastPlaySpeed else speed)
+        outState.putBoolean("session.speedDialog", showSpeedDialog)
+        outState.putBoolean("session.audioDialog", showAudioDialog)
+        outState.putBoolean("session.subDialog", showSubDialog)
+        if (initialized && !loadPending && activeEntryId != null) {
+            runCatching {
+                if (engineEntryId() == activeEntryId) {
+                    for (property in arrayOf("aid", "sid", "sub-delay", "audio-delay", "video-zoom")) {
+                        MPVLib.getPropertyString(property)?.let { outState.putString("session.$property", it) }
+                    }
+                }
+            }.onFailure { AppLog.w(TAG, "session UI capture failed: ${it.message}") }
+            outState.putStringArrayList("session.externalSubs", ArrayList(externalSubtitleUris))
+        }
+        outState.putFloat("session.brightness", window.attributes.screenBrightness)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun restoreHeldSpeed() {
+        if (!fastPlayHeld) return
+        fastPlayHeld = false
+        speed = preFastPlaySpeed
+        if (initialized && !destroyed) mpv("restore held speed") { MPVLib.setPropertyDouble("speed", speed) }
+        hudMode = HudMode.NONE
+    }
+
     override fun onPause() {
         captureCurrentProgress()
+        playbackIntent.foreground(false)
+        gestureEpoch++
+        restoreHeldSpeed()
+        applyPlaybackGate()
         super.onPause()
-        if (initialized) mpv("pause") { MPVLib.setPropertyBoolean("pause", true) }
     }
 
     override fun onDestroy() {
@@ -2371,6 +2577,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         destroyed = true
         loadGeneration++
         activeEntryId = null
+        if (isFinishing) {
+            val token = playlistToken
+            val application = applicationContext
+            if (token != null) LibraryWork.scope.launch {
+                runCatching { PlayerPlaylistStore(application.filesDir.resolve("player-playlists")).remove(token) }
+                    .onFailure { AppLog.w(TAG, "playlist cleanup failed: ${it.message}") }
+            }
+        }
         super.onDestroy()
         pollJob?.cancel()
         controlsTimerJob?.cancel()

@@ -91,7 +91,7 @@ def main() -> None:
         output = CACHE / abi
         output.mkdir(parents=True, exist_ok=True)
         libs = ROOT / 'app/src/main/jniLibs' / abi
-        for dependency in ('mpv', 'avformat', 'avcodec', 'avutil', 'swscale', 'c++_shared'):
+        for dependency in ('mpv', 'avformat', 'avcodec', 'avutil', 'c++_shared'):
             if not (libs / f'lib{dependency}.so').is_file():
                 raise RuntimeError(f'missing packaged dependency {abi}: {dependency}')
         # Use in-process frontends for single-input configuration probes.
@@ -102,10 +102,10 @@ def main() -> None:
         # Real FFmpeg configure produces public avconfig.h; no FFmpeg code is built.
         run([str(ffmpeg / 'configure'), '--target-os=android', f'--arch={arch}', '--enable-cross-compile', f'--cc={cc}', '--disable-everything', '--disable-autodetect', '--disable-programs', '--disable-doc', '--disable-x86asm', '--disable-inline-asm', '--disable-asm'], config)
         cmd = cxx + ['-std=c++11', '-O2', '-fPIC', '-shared', '-nostdlib++', '-Wl,-soname,libplayer.so', '-Wl,--no-undefined', '-I', str(mpv / 'include'), '-I', str(config), '-I', str(ffmpeg)]
-        cmd += [str(BRIDGE / f'{name}.cpp') for name in ('main', 'render', 'log', 'jni_utils', 'property', 'event', 'thumbnail', 'media_probe')]
+        cmd += [str(BRIDGE / f'{name}.cpp') for name in ('main', 'render', 'log', 'jni_utils', 'property', 'event', 'media_probe')]
         # Explicit path prevents accidentally linking the NDK libc++ instead
         # of the libc++_shared packaged beside the retained dependencies.
-        cmd += ['-L', str(libs), '-lmpv', '-lavformat', '-lavcodec', '-lavutil', '-lswscale', str(libs / 'libc++_shared.so'), '-llog', '-latomic', '-landroid', '-o', str(output / 'libplayer.so')]
+        cmd += ['-L', str(libs), '-lmpv', '-lavformat', '-lavcodec', '-lavutil', str(libs / 'libc++_shared.so'), '-llog', '-latomic', '-landroid', '-o', str(output / 'libplayer.so')]
         run(cmd, ROOT)
     for abi in ABIS:
         shutil.copy2(CACHE / abi / 'libplayer.so', ROOT / 'app/src/main/jniLibs' / abi / 'libplayer.so')

@@ -179,7 +179,8 @@ object AppLog {
     private val sensitiveValue = Regex(
         """(?ix)
         (?:content|file)://
-        | /(?:storage|data|data_mirror|sdcard|mnt|cache|external_files)(?:/|\b)
+        | (?<![\w/])/(?!/)[^\s/]
+        | \b[a-z]:\\
         | \b(?:primary|[0-9a-f]{4}-[0-9a-f]{4}):
         """,
     )
@@ -188,7 +189,9 @@ object AppLog {
     )
     private val sourceLabel = Regex(
         """(?i)(?:\bopen\s+|\b(?:openFileDescriptor|real-path probe|cacheCopy) failed for\s+|""" +
-            """\bno readable source for\s+|\bsubtitle too large, rejected\s+)""",
+            """\bno readable source for\s+|\bsubtitle too large, rejected\s+|""" +
+            """\b(?:Cannot open file|Cannot disable read ahead on file|Failed to avformat_open_input|""" +
+            """Opening ICC profile|Opening 3D LUT cache in file|Loading custom LUT|Failed to read LUT data from)\s+)""",
     )
     private val exceptionClass = Regex("""\b(?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*(?:Exception|Error)\b""")
 

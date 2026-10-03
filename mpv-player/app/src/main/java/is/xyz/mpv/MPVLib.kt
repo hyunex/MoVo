@@ -5,7 +5,6 @@
 package `is`.xyz.mpv
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.view.Surface
 
 // Wrapper for native library
@@ -25,11 +24,14 @@ object MPVLib {
     external fun attachSurface(surface: Surface)
     external fun detachSurface()
 
+    /**
+     * Submit 1..63 non-null arguments. Invalid argument arrays throw
+     * IllegalArgumentException; an unavailable player or rejected mpv command
+     * throws IllegalStateException. Successful commands return normally.
+     */
     external fun command(cmd: Array<out String>)
 
     external fun setOptionString(name: String, value: String): Int
-
-    external fun grabThumbnail(dimension: Int): Bitmap?
 
     /**
      * Demux a borrowed, seekable descriptor without creating or using the player.

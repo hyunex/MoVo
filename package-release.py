@@ -14,8 +14,8 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "1.0.31"
-CODE = "32"
+VERSION = "1.0.32"
+CODE = "33"
 PACKAGE = "com.example.mpvlibrary"
 VARIANTS = {"arm64-v8a": "arm64", "armeabi-v7a": "armv7", "x86_64": "x86_64", "universal": "universal"}
 
@@ -81,8 +81,9 @@ def check_manifest(aapt, apk, abi, unsigned):
         fail(f"Refusing debuggable APK: {apk}")
     tree = run([aapt, "dump", "xmltree", apk, "AndroidManifest.xml"])
     debug = re.findall(r"android:debuggable[^\n]*", tree)
-    if len(debug) != 1 or not re.search(r"\(type 0x12\)0x0(?:\s|$)", debug[0]):
-        fail(f"Manifest must explicitly declare debuggable=false: {apk}")
+    # Android defaults an absent application debuggable flag to false.
+    if len(debug) > 1 or (debug and not re.search(r"\(type 0x12\)0x0(?:\s|$)", debug[0])):
+        fail(f"Manifest enables debugging or has an unexpected debug flag: {apk}")
     native = re.search(r"^native-code:\s*(.*)$", badging, re.MULTILINE)
     found = set(re.findall(r"'([^']+)'", native.group(1))) if native else set()
     required = set(VARIANTS) - {"universal"} if abi == "universal" else {abi}
@@ -134,8 +135,8 @@ def main():
     if not args.previous_apk.is_file():
         fail(f"Previous published APK is required: {args.previous_apk}; set PREVIOUS_APK or --previous-apk")
     prior_badging = run([aapt, "dump", "badging", args.previous_apk])
-    if f"package: name='{PACKAGE}' versionCode='31' versionName='1.0.30'" not in prior_badging:
-        fail("Previous APK must be the published MoVo 1.0.30/code 31 with the same package")
+    if f"package: name='{PACKAGE}' versionCode='32' versionName='1.0.31'" not in prior_badging:
+        fail("Previous APK must be the published MoVo 1.0.31/code 32 with the same package")
     prior_old_evidence = run([apksigner, "verify", "--min-sdk-version", "26",
                               "--max-sdk-version", "27", "--print-certs", args.previous_apk])
     prior_old_cert = one_fingerprint(prior_old_evidence, "previous published APK / API 26-27")

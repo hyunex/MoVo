@@ -17,8 +17,6 @@ extern "C" {
 #include "jni_utils.h"
 #include "event.h"
 
-#define ARRAYLEN(a) (sizeof(a)/sizeof(a[0]))
-
 extern "C" {
     jni_func(void, create, jobject appctx);
     jni_func(void, init);
@@ -33,6 +31,30 @@ std::atomic<bool> g_event_thread_request_exit(false);
 
 static pthread_t event_thread_id;
 static jobject global_appctx;
+
+static void throwJavaException(JNIEnv *env, const char *type, const char *message) {
+    if (env->ExceptionCheck()) return;
+    jclass exception = env->FindClass(type);
+    if (!exception) return;
+    env->ThrowNew(exception, message);
+    env->DeleteLocalRef(exception);
+}
+
+// Keep local references and UTF buffers paired even when acquisition fails
+// midway through a command. No heap allocation is needed for the argument list.
+struct CommandArguments {
+    JNIEnv *env;
+    jstring strings[64] = {};
+    const char *values[64] = {};
+
+    explicit CommandArguments(JNIEnv *environment) : env(environment) {}
+    ~CommandArguments() {
+        for (int i = 0; i < 64; ++i) {
+            if (values[i]) env->ReleaseStringUTFChars(strings[i], values[i]);
+            if (strings[i]) env->DeleteLocalRef(strings[i]);
+        }
+    }
+};
 
 static void prepare_environment(JNIEnv *env, jobject appctx) {
     setlocale(LC_NUMERIC, "C");
@@ -97,23 +119,34 @@ jni_func(void, destroy) {
 }
 
 jni_func(void, command, jobjectArray jarray) {
-    CHECK_MPV_INIT();
-
-    jstring strings[64] = {0};
-    const char *arguments[64] = {0};
-    jsize len = env->GetArrayLength(jarray);
-    if (len >= ARRAYLEN(arguments)) // null-terminated
-        die("too many command arguments");
-
-    for (jsize i = 0; i < len; ++i) {
-        strings[i] = (jstring)env->GetObjectArrayElement(jarray, i);
-        arguments[i] = env->GetStringUTFChars(strings[i], NULL);
+    if (!jarray) {
+        throwJavaException(env, "java/lang/IllegalArgumentException", "command array must not be null");
+        return;
+    }
+    const jsize len = env->GetArrayLength(jarray);
+    if (env->ExceptionCheck()) return;
+    if (len < 1 || len > 63) {
+        throwJavaException(env, "java/lang/IllegalArgumentException", "command requires 1 to 63 arguments");
+        return;
     }
 
-    mpv_command(g_mpv, arguments);
-
+    CommandArguments arguments(env);
     for (jsize i = 0; i < len; ++i) {
-        env->ReleaseStringUTFChars(strings[i], arguments[i]);
-        env->DeleteLocalRef(strings[i]);
+        arguments.strings[i] = static_cast<jstring>(env->GetObjectArrayElement(jarray, i));
+        if (env->ExceptionCheck()) return;
+        if (!arguments.strings[i]) {
+            throwJavaException(env, "java/lang/IllegalArgumentException", "command arguments must not be null");
+            return;
+        }
+        arguments.values[i] = env->GetStringUTFChars(arguments.strings[i], nullptr);
+        if (!arguments.values[i]) return; // Preserve the JVM allocation exception.
     }
+
+    if (!g_mpv) {
+        throwJavaException(env, "java/lang/IllegalStateException", "libmpv is not initialized");
+        return;
+    }
+    const int result = mpv_command(g_mpv, arguments.values);
+    if (result < 0)
+        throwJavaException(env, "java/lang/IllegalStateException", mpv_error_string(result));
 }

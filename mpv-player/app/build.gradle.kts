@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.mpvlibrary"
         minSdk = 26
         targetSdk = 34
-        versionCode = 32
-        versionName = "1.0.31"
+        versionCode = 33
+        versionName = "1.0.32"
         vectorDrawables { useSupportLibrary = true }
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -29,9 +29,6 @@ android {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
-    }
-    lint {
-        disable += listOf("HardcodedDebugMode")
     }
 
     compileOptions {

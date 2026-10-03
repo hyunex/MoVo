@@ -60,11 +60,19 @@ interface VideoDao {
     @Query("UPDATE videos SET videoWidth = :width, videoHeight = :height, hasEmbeddedSubtitles = :subtitles, durationSec = CASE WHEN :duration > 0 THEN :duration ELSE durationSec END, metadataChecked = 1 WHERE uri = :uri AND sizeBytes = :size AND lastModified = :modified AND metadataChecked = 0")
     suspend fun saveMetadata(uri: String, size: Long, modified: Long, width: Int?, height: Int?, subtitles: Boolean?, duration: Double?)
 
+    /** Explicit user retries reopen failed probes, never already inspected media. */
+    @Query("UPDATE videos SET metadataChecked = 0 WHERE folderId = :folderId AND metadataChecked = 1 AND hasEmbeddedSubtitles IS NULL")
+    suspend fun retryFailedMetadata(folderId: Long)
+
     @Query("DELETE FROM videos WHERE folderId = :folderId")
     suspend fun deleteForFolder(folderId: Long)
 
-    @Query("UPDATE videos SET positionSec = :position, durationSec = :duration, lastPlayedAt = :now WHERE uri = :uri")
+    @Query("UPDATE videos SET positionSec = :position, durationSec = CASE WHEN :duration > 0 THEN :duration ELSE durationSec END, lastPlayedAt = :now WHERE uri = :uri")
     suspend fun saveProgress(uri: String, position: Double, duration: Double, now: Long)
+
+    /** EOF is completion even when the demuxer never supplied a duration. */
+    @Query("UPDATE videos SET positionSec = :position, durationSec = CASE WHEN :duration > 0 THEN :duration ELSE durationSec END, lastPlayedAt = :now, watchedOverride = CASE WHEN watchedOverride = -1 THEN -1 ELSE 1 END WHERE uri = :uri")
+    suspend fun saveCompletedProgress(uri: String, position: Double, duration: Double, now: Long)
 
     @Query("UPDATE videos SET watchedOverride = :override WHERE uri = :uri")
     suspend fun setOverride(uri: String, override: Int)

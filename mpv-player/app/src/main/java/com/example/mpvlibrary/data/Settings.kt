@@ -199,12 +199,34 @@ class SettingsRepo(private val context: Context) {
             "log-file", "save-position-on-quit",
         )
         private val APP_CONTROLLED_OPTIONS = setOf("force-window", "idle")
+        private val EXTERNAL_PATH_OPTIONS = setOf(
+            "playlist", "sub-ass-styles", "icc-profile", "lut", "image-lut",
+            "target-lut", "autoload-files", "sub-auto", "ordered-chapters-files", "chapters-file",
+            "sub-fonts-dir", "osd-fonts-dir", "osd-bar-fonts-dir",
+        )
+
+        // These filters only transform supplied frames. Arbitrary lavfi graphs can open
+        // files (movie/amovie, subtitles, drawtext, sendcmd, etc.) outside the SAF grant.
+        // Deliberately accept a simple chain, not libavfilter's nested graph grammar.
+        private val SAFE_FILTERS = setOf(
+            "scale", "crop", "format", "fps", "vflip", "hflip", "transpose",
+            "rotate", "eq", "hue", "unsharp", "yadif", "bwdif", "deband",
+            "volume", "pan", "aformat", "aresample", "atempo", "equalizer",
+            "bass", "treble", "loudnorm", "dynaudnorm", "acompressor", "alimiter",
+        )
+        private val SIMPLE_FILTER = Regex("([a-z][a-z0-9]*)(?:=([a-zA-Z0-9_.:=+*/() -]+))?")
+
+        private fun safeFilterChain(value: String): Boolean =
+            value.split(',').all { filter ->
+                val match = SIMPLE_FILTER.matchEntire(filter.trim())
+                match != null && match.groupValues[1] in SAFE_FILTERS
+            }
 
         private fun normalizeOptionKey(key: String): String =
             key.trim().trimStart { it == '-' || it.isWhitespace() }
                 .lowercase(Locale.ROOT).replace('_', '-')
 
-        private fun optionRejectionReason(key: String): OptionRejectionReason? {
+        private fun optionRejectionReason(key: String, value: String): OptionRejectionReason? {
             // Negated booleans and settings-list operations must use the same policy.
             var base = key
             while (base.startsWith("no-")) base = base.removePrefix("no-")
@@ -219,17 +241,23 @@ class SettingsRepo(private val context: Context) {
                 base in WRITE_OPTIONS ||
                     matches("screenshot", "watch-later", "write-filename-in-watch-later",
                         "record", "stream-record", "stream-dump", "stream-capture", "dump",
-                        "cache-dir", "cache-on-disk", "gpu-shader-cache-dir", "icc-cache-dir",
-                        "odash", "ogs") -> OptionRejectionReason.FILE_WRITING
+                        "cache-dir", "cache-on-disk", "demuxer-cache",
+                        "gpu-shader-cache-dir", "icc-cache-dir", "vo-image-outdir",
+                        "save-watch-history", "watch-history-path", "odash", "ogs") -> OptionRejectionReason.FILE_WRITING
                 matches("script", "load-script", "lua", "js", "javascript", "ytdl") ->
                     OptionRejectionReason.SCRIPTS
                 matches("config", "include") -> OptionRejectionReason.CONFIG
                 matches("tls", "ssl", "http", "proxy", "cookie", "referrer", "user-agent") ->
                     OptionRejectionReason.NETWORK
-                base in APP_CONTROLLED_OPTIONS || matches("input", "osc") ->
+                base in APP_CONTROLLED_OPTIONS || base == "access-references" ||
+                    base == "load-unsafe-playlists" || matches("input", "osc") ->
                     OptionRejectionReason.APP_CONTROLLED
-                matches("sub-file", "audio-file", "external-file", "cover-art") ->
-                    OptionRejectionReason.EXTERNAL_PATHS
+                base == "lavfi-complex" ||
+                    ((base == "vf" || base == "af") && !safeFilterChain(value)) ||
+                    base in EXTERNAL_PATH_OPTIONS ||
+                    matches("sub-file", "audio-file", "external-file", "cover-art",
+                        "glsl-shader", "dvd-device", "bluray-device", "cdda",
+                        "dvb", "drm-device") -> OptionRejectionReason.EXTERNAL_PATHS
                 else -> null
             }
         }
@@ -258,7 +286,7 @@ class SettingsRepo(private val context: Context) {
                     rejected += OptionRejection("${index + 1}번째 줄 (잘못된 키)", OptionRejectionReason.MALFORMED)
                     return@forEachIndexed
                 }
-                val reason = optionRejectionReason(key)
+                val reason = optionRejectionReason(key, value)
                     ?: if (value.isEmpty()) OptionRejectionReason.MALFORMED else null
                 if (reason != null) {
                     rejected += OptionRejection(key, reason)

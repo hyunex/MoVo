@@ -35,8 +35,15 @@ class MPVPlayerView @JvmOverloads constructor(
     fun initialize(configDir: String, cacheDir: String) {
         runCatching {
             MPVLib.create(context.applicationContext)
-            MPVLib.setOptionString("config", "yes")
+            MPVLib.setOptionString("config", "no")
             MPVLib.setOptionString("config-dir", configDir)
+            MPVLib.setOptionString("load-scripts", "no")
+            MPVLib.setOptionString("autoload-files", "no")
+            MPVLib.setOptionString("sub-auto", "no")
+            // Pinned source: playlist/demuxer references must never escape the SAF-granted file.
+            MPVLib.setOptionString("access-references", "no")
+            // Loading is always paused until PlayerActivity grants foreground audio ownership.
+            MPVLib.setOptionString("pause", "yes")
             for (opt in arrayOf("gpu-shader-cache-dir", "icc-cache-dir"))
                 MPVLib.setOptionString(opt, cacheDir)
             MPVLib.setOptionString("msg-level", "all=warn")

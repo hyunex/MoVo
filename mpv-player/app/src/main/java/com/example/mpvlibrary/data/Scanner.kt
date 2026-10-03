@@ -32,6 +32,27 @@ private data class ScannedVideo(val uri: String, val name: String, val dirPath: 
 private class IncompleteScan(message: String) : Exception(message)
 private class CompletedScanAttempt(val treeUri: String)
 
+/** Document IDs are provider identities, not paths. Completed aliases need no second query. */
+internal class ScanDocumentTracker {
+    private val activeDirectories = HashSet<String>()
+    private val completedDirectories = HashSet<String>()
+    private val videos = HashSet<String>()
+
+    fun enterDirectory(id: String): Boolean {
+        if (id in activeDirectories) throw IncompleteScan("폴더 순환 참조가 있습니다")
+        if (id in completedDirectories) return false
+        activeDirectories.add(id)
+        return true
+    }
+
+    fun completeDirectory(id: String) {
+        activeDirectories.remove(id)
+        completedDirectories.add(id)
+    }
+
+    fun addVideo(id: String): Boolean = videos.add(id)
+}
+
 /** Walks a registered SAF tree and syncs its videos into the database. */
 class LibraryScanner(private val context: Context) {
 
@@ -137,22 +158,23 @@ class LibraryScanner(private val context: Context) {
         }
     }
 
-    suspend fun scan(folder: FolderEntity) = withContext(Dispatchers.IO) {
-        // A request already waiting for this tree reuses the finished attempt,
-        // but a retry submitted after a failure captures its stamp and runs again.
+    suspend fun scan(folder: FolderEntity, retryMetadata: Boolean = false) = withContext(Dispatchers.IO) {
+        // Automatic requests already waiting for this tree reuse the finished attempt.
+        // Explicit retries must still invalidate failures, even after an automatic scan.
         val previousAttempt = completedAttempts[folder.id]
         scanMutex.withLock {
             val latestAttempt = completedAttempts[folder.id]
-            if (latestAttempt !== previousAttempt && latestAttempt?.treeUri == folder.treeUri) return@withLock
+            if (!retryMetadata && latestAttempt !== previousAttempt && latestAttempt?.treeUri == folder.treeUri) return@withLock
             updateStatusIfRegistered(folder, ScanStatus(true, false))
             try {
+                if (retryMetadata) VideoMetadata.retryFailed(context, folder.id)
                 val tree = Uri.parse(folder.treeUri)
                 if (!hasPersistedPermission(context, tree, write = false)) throw IncompleteScan("폴더 읽기 권한이 없습니다")
                 val originalTreeUri = folder.treeUri
                 val rootId = DocumentsContract.getTreeDocumentId(tree)
                 val rootUri = DocumentsContract.buildDocumentUriUsingTree(tree, rootId)
                 val snapshot = ArrayList<ScannedVideo>()
-                walk(tree, rootUri, "", 0, snapshot)
+                walk(tree, rootUri, "", 0, snapshot, ScanDocumentTracker())
                 db.withTransaction {
                     val stillRegistered = db.folders().byId(folder.id)
                     if (stillRegistered == null || stillRegistered.treeUri != originalTreeUri) {
@@ -206,13 +228,15 @@ class LibraryScanner(private val context: Context) {
         }
     }
 
-    suspend fun scanAll() = withContext(Dispatchers.IO) {
-        for (folder in db.folders().all()) scan(folder)
+    suspend fun scanAll(retryMetadata: Boolean = false) = withContext(Dispatchers.IO) {
+        for (folder in db.folders().all()) scan(folder, retryMetadata)
     }
 
-    private suspend fun walk(tree: Uri, directory: Uri, prefix: String, depth: Int, found: MutableList<ScannedVideo>) {
+    private suspend fun walk(tree: Uri, directory: Uri, prefix: String, depth: Int, found: MutableList<ScannedVideo>, identities: ScanDocumentTracker) {
+        val directoryId = DocumentsContract.getDocumentId(directory)
+        if (!identities.enterDirectory(directoryId)) return
         if (depth > MAX_SCAN_DEPTH) throw IncompleteScan("폴더 깊이 제한 초과: $prefix")
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(directory))
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, directoryId)
         val cursor = queryChildren(childrenUri)
             ?: throw IncompleteScan("폴더 목록을 읽을 수 없습니다: $prefix")
         val siblingNames = ArrayList<String>()
@@ -240,10 +264,9 @@ class LibraryScanner(private val context: Context) {
                     siblingNames.add(name)
                 }
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                    if (depth >= MAX_SCAN_DEPTH) throw IncompleteScan("폴더 깊이 제한 초과: $prefix/$name")
                     val child = DocumentsContract.buildDocumentUriUsingTree(tree, id)
-                    walk(tree, child, if (prefix.isEmpty()) name else "$prefix/$name", depth + 1, found)
-                } else if (isVideo(name)) {
+                    walk(tree, child, if (prefix.isEmpty()) name else "$prefix/$name", depth + 1, found, identities)
+                } else if (isVideo(name) && identities.addVideo(id)) {
                     val child = DocumentsContract.buildDocumentUriUsingTree(tree, id)
                     directoryVideos.add(ScannedVideo(child.toString(), name, prefix, if (it.isNull(sizeCol)) 0 else it.getLong(sizeCol), if (it.isNull(modifiedCol)) 0 else it.getLong(modifiedCol)))
                 }
@@ -256,6 +279,7 @@ class LibraryScanner(private val context: Context) {
             currentCoroutineContext().ensureActive()
             found.add(video.copy(hasExternalSubtitles = siblingNames.isNotEmpty() && MpvPath.matchSubtitles(video.name, siblingNames).isNotEmpty()))
         }
+        identities.completeDirectory(directoryId)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)

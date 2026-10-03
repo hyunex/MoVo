@@ -399,7 +399,7 @@ fun LibraryScreen(
         if (uri != null) {
             LibraryWork.scope.launch {
                 val folder = scanner.register(uri)
-                scanner.scan(folder)
+                scanner.scan(folder, retryMetadata = true)
             }
         }
     }
@@ -507,7 +507,7 @@ fun LibraryScreen(
                                 } else if (status?.error != null) {
                                     Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Text("스캔 실패", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
-                                        TextButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scan(f) } }) { Text("재시도") }
+                                        TextButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scan(f, retryMetadata = true) } }) { Text("재시도") }
                                     }
                                 }
                             }
@@ -537,7 +537,7 @@ fun LibraryScreen(
                                     TopAppBar(
                                         title = { Text("이어보기", fontWeight = FontWeight.Bold) },
                                         actions = {
-                                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
+                                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll(retryMetadata = true) } }) {
                                                 Icon(Icons.Default.Refresh, "스캔")
                                             }
                                         },
@@ -549,7 +549,7 @@ fun LibraryScreen(
                                     videos = continueWatching,
                                     threshold = threshold,
                                     onPlay = playContinueVideo,
-                                    onRefresh = { scanner.scanAll() },
+                                    onRefresh = { scanner.scanAll(retryMetadata = true) },
                                     deleteState = deleteState,
                                     modifier = Modifier.padding(pad),
                                     thumbSize = when (thumbScale) {
@@ -619,7 +619,7 @@ fun LibraryScreen(
                             IconButton(onClick = { picker.launch(null) }) {
                                 Icon(Icons.Default.CreateNewFolder, "영상 폴더 등록")
                             }
-                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
+                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll(retryMetadata = true) } }) {
                                 Icon(Icons.Default.Refresh, "스캔")
                             }
                             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
@@ -685,7 +685,7 @@ fun LibraryScreen(
                                 videos = continueWatching,
                                 threshold = threshold,
                                 onPlay = playContinueVideo,
-                                onRefresh = { scanner.scanAll() },
+                                onRefresh = { scanner.scanAll(retryMetadata = true) },
                                 deleteState = deleteState,
                                 thumbSize = when (thumbScale) {
                                     "small" -> 88.dp
@@ -743,7 +743,7 @@ fun LibraryScreen(
 @Composable
 fun RecentRow(v: VideoEntity, threshold: Double, onClick: () -> Unit) {
     val context = LocalContext.current
-    LaunchedEffect(v.uri, v.sizeBytes, v.lastModified) {
+    LaunchedEffect(v.uri, v.sizeBytes, v.lastModified, v.metadataChecked) {
         VideoMetadata.ensure(context.applicationContext, v)
     }
     val watched = v.isWatched(threshold)
@@ -1004,7 +1004,7 @@ class SafeDeleteState(
         val retry = pendingDeleteTargets.toList()
         pendingDeleteTargets = emptyList()
         LibraryWork.scope.launch {
-            scanner.scan(target)
+            scanner.scan(target, retryMetadata = true)
             kotlinx.coroutines.withContext(Dispatchers.Main) {
                 reauthTarget = null
                 if (retry.isNotEmpty()) {
@@ -1271,10 +1271,10 @@ fun FolderScreen(
             .sorted()
             .toList()
     }
-    val here = remember(videosByDir, naturalNameKeys, path, query, unseenOnly, sortByName) {
+    val here = remember(videosByDir, naturalNameKeys, path, query, unseenOnly, sortByName, threshold) {
         val filtered = videosByDir[path].orEmpty().filter {
             (query.isBlank() || it.name.contains(query, ignoreCase = true)) &&
-                (!unseenOnly || it.positionSec == 0.0)
+                (!unseenOnly || !it.isWatched(threshold))
         }
         if (sortByName) filtered.sortedBy { naturalNameKeys.getValue(it.uri) }
         else filtered.sortedByDescending { it.lastPlayedAt }
@@ -1307,7 +1307,7 @@ fun FolderScreen(
                 ) {
                     Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("폴더 스캔 실패. 기존 영상 목록은 유지됩니다.", modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = { scope.launch(Dispatchers.IO) { folder?.let { scanner.scan(it) } } }) { Text("재시도") }
+                        TextButton(onClick = { scope.launch(Dispatchers.IO) { folder?.let { scanner.scan(it, retryMetadata = true) } } }) { Text("재시도") }
                     }
                 }
             }
@@ -1424,7 +1424,7 @@ fun FolderScreen(
             }
             PullRefreshWrapper(
                 modifier = Modifier.weight(1f),
-                onRefresh = { scanner.scanAll() },
+                onRefresh = { scanner.scanAll(retryMetadata = true) },
             ) {
                 LazyColumn(Modifier.fillMaxSize()) {
                     if (subDirs.isNotEmpty()) {
@@ -1586,7 +1586,7 @@ fun FolderScreen(
                             }
                         },
                         actions = {
-                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll() } }) {
+                            IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll(retryMetadata = true) } }) {
                                 Icon(Icons.Default.Refresh, "새로고침")
                             }
                             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
@@ -1650,7 +1650,7 @@ fun VideoRow(
     thumbWidth: Dp = 116.dp,
 ) {
     val context = LocalContext.current
-    LaunchedEffect(v.uri, v.sizeBytes, v.lastModified) {
+    LaunchedEffect(v.uri, v.sizeBytes, v.lastModified, v.metadataChecked) {
         VideoMetadata.ensure(context.applicationContext, v)
     }
     val watched = v.isWatched(threshold)
@@ -1991,7 +1991,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Text(
                             "플레이어에 노출될 배속 버튼 목록을 추가하거나 삭제할 수 있습니다. (클릭 시 기본 배속으로 지정)",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                         )
 
@@ -2125,7 +2125,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Text(
                             "플레이어에서 배속을 미세 조절할 때 증감할 최소 단위입니다. (0.01 ~ 1.0, 기본값: ${SettingsRepo.formatSpeed(SettingsRepo.DEFAULT_SPEED_STEP)})",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                         )
 
@@ -2248,7 +2248,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Text(
                             "이어보기 화면에서 영상을 재생할 때 플레이어에 구성될 재생 목록의 기준을 선택합니다.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                         )
 
@@ -2278,7 +2278,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                     Spacer(Modifier.width(8.dp))
                                     Column(Modifier.weight(1f)) {
                                         Text(mode.title, style = MaterialTheme.typography.bodyLarge, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium)
-                                        Text(mode.subtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                        Text(mode.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
                             }
@@ -2303,7 +2303,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Text(
                             "폴더 화면과 이어보기의 목록형 썸네일 크기에 바로 적용됩니다.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                         )
 
@@ -2344,7 +2344,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                         Text(
                             "화면 비율이 다른 영상이 재생될 때 화면 내 수직 배치 위치를 지정합니다.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
                         )
 
@@ -2361,7 +2361,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                             ) {
                                 Column(Modifier.weight(1f)) {
                                     Text(currentAlign.title, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
-                                    Text(currentAlign.subtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                                    Text(currentAlign.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 Icon(Icons.Default.ArrowDropDown, "선택")
                             }
@@ -2399,7 +2399,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 Text("자동 다음 영상 재생", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                                 Text(
                                     "영상이 끝나면 같은 폴더의 다음 영상을 바로 재생합니다.",
-                                    style = MaterialTheme.typography.bodySmall, color = Color.Gray,
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             Switch(
@@ -2456,7 +2456,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 Text("밝기 기억하기", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                                 Text(
                                     "제스처로 조절한 화면 밝기를 다음 재생에도 유지합니다.",
-                                    style = MaterialTheme.typography.bodySmall, color = Color.Gray,
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             Switch(
@@ -2472,7 +2472,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 Text("외부 자막 자동 로드", style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                                 Text(
                                     "영상과 같은 이름의 자막 파일(.srt/.vtt/.ass 등)을 자동으로 불러옵니다.",
-                                    style = MaterialTheme.typography.bodySmall, color = Color.Gray,
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
                             Switch(
@@ -2499,7 +2499,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                             Text("고급 MPV 엔진 설정", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text(
                                 if (mpvOptions.isBlank()) "기본 설정 사용 중" else "사용자 정의 옵션 적용 중",
-                                style = MaterialTheme.typography.bodySmall, color = Color.Gray,
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                         OutlinedButton(
@@ -2523,7 +2523,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 ) {
                     Column(Modifier.padding(16.dp)) {
                         Text("디버그 로그", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                        Text(AppLog.info(), style = MaterialTheme.typography.bodySmall, color = Color.Gray, modifier = Modifier.padding(vertical = 4.dp))
+                        Text(AppLog.info(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 4.dp))
                         var logText by remember { mutableStateOf<String?>(null) }
                         FlowRow(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = { logText = AppLog.tail(200) }) { Text("로그 보기") }
@@ -2613,10 +2613,11 @@ fun SettingsScreen(onBack: () -> Unit) {
         var tempOptions by remember { mutableStateOf(mpvOptions) }
         var optionWarning by remember { mutableStateOf<String?>(null) }
         AlertDialog(
+            modifier = Modifier.imePadding(),
             onDismissRequest = { showMpvDialog = false },
             title = { Text("고급 MPV 설정 (mpv.conf)") },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text(
                         "libmpv에 전달할 옵션을 key=value 형식으로 한 줄씩 입력하세요.\n예: hwdec=auto, profile=fast\n파일 기록·저장(log-file 포함), 영상·음성 출력 선택(ao/vo), 스크립트·외부 설정·네트워크·외부 파일 경로·앱 관리 옵션은 저장할 수 없습니다. 차단된 줄을 직접 삭제한 뒤 저장하세요.",
                         style = MaterialTheme.typography.bodySmall,
@@ -2626,7 +2627,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     OutlinedTextField(
                         value = tempOptions,
                         onValueChange = { tempOptions = it; optionWarning = null },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 280.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 96.dp, max = 192.dp),
                         shape = RoundedCornerShape(10.dp),
                         placeholder = { Text("# 추가 옵션 입력") },
                     )

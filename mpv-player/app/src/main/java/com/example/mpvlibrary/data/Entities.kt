@@ -45,6 +45,11 @@ data class VideoEntity(
             else -> null
         }
 
+    /** A queued probe may only inspect the same, still unchecked source revision. */
+    internal fun needsMetadataProbe(requested: VideoEntity): Boolean =
+        !metadataChecked && uri == requested.uri && sizeBytes == requested.sizeBytes &&
+            lastModified == requested.lastModified
+
     fun isWatched(threshold: Double): Boolean =
         watchedOverride == 1 || (watchedOverride == 0 && fraction >= threshold)
 
