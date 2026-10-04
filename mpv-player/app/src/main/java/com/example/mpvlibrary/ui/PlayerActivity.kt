@@ -68,6 +68,7 @@ import com.example.mpvlibrary.data.AppLog
 import com.example.mpvlibrary.data.LibraryWork
 import com.example.mpvlibrary.data.PlayerPlaylistStore
 import com.example.mpvlibrary.data.SettingsRepo
+import com.example.mpvlibrary.data.VideoAlign
 import com.example.mpvlibrary.mpv.MPVPlayerView
 import com.example.mpvlibrary.mpv.MpvPath
 import `is`.xyz.mpv.MPVLib
@@ -292,6 +293,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var isScrubbing by mutableStateOf(false)
     private var scrubPosition by mutableStateOf(0.0)
     private var currentAspectMode by mutableStateOf(AspectRatioMode.BEST_FIT)
+    private var currentVideoAlign by mutableStateOf(VideoAlign.TOP)
     private var autoRotate by mutableStateOf(true)
     private var controlsTimerJob: Job? = null
     private var gestureEpoch by mutableIntStateOf(0)
@@ -300,6 +302,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var showSpeedDialog by mutableStateOf(false)
     private var showSubDialog by mutableStateOf(false)
     private var showAudioDialog by mutableStateOf(false)
+    private var showDisplayDialog by mutableStateOf(false)
 
     // Subtitle & Audio tracks
     private var subTracks by mutableStateOf<List<TrackItem>>(emptyList())
@@ -613,6 +616,12 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             onDismiss = { showSpeedDialog = false },
                         )
                     }
+                    if (showDisplayDialog) {
+                        DisplayDialog(onDismiss = {
+                            showDisplayDialog = false
+                            resetControlsTimer()
+                        })
+                    }
                 }
             }
         }
@@ -628,6 +637,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
             // Apply natural language video vertical alignment
             val alignY = settings.videoAlignY.first()
+            currentVideoAlign = VideoAlign.fromValue(alignY)
             mpv("video-align-y=$alignY") {
                 val r = MPVLib.setOptionString("video-align-y", alignY)
                 AppLog.i(TAG, "video-align-y applied: $alignY (result=$r)")
@@ -1092,14 +1102,20 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         resetControlsTimer()
     }
 
-    private fun cycleAspectRatio() {
-        val modes = AspectRatioMode.entries
-        val nextIndex = (modes.indexOf(currentAspectMode) + 1) % modes.size
-        val next = modes[nextIndex]
+    private fun selectAspectRatio(next: AspectRatioMode) {
         currentAspectMode = next
         mpv("aspect ratio") { applyAspectRatio(next) }
         showHud(HudMode.ASPECT, next.title)
-        resetControlsTimer()
+    }
+
+    private fun selectVideoAlign(next: VideoAlign) {
+        currentVideoAlign = next
+        mpv("video-align-y=${next.value}") {
+            val result = MPVLib.setOptionString("video-align-y", next.value)
+            if (result < 0) AppLog.w(TAG, "video-align-y rejected: ${next.value}")
+            else AppLog.i(TAG, "video-align-y applied: ${next.value} (result=$result)")
+        }
+        lifecycleScope.launch { settings.setVideoAlignY(next.value) }
     }
 
     private fun applyAspectRatio(next: AspectRatioMode) {
@@ -1831,18 +1847,23 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             }
                             Spacer(Modifier.width(4.dp))
                             OutlinedButton(
-                                onClick = { cycleAspectRatio() },
+                                onClick = {
+                                    controlsTimerJob?.cancel()
+                                    showDisplayDialog = true
+                                },
                                 shape = RoundedCornerShape(8.dp),
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
                                 border = ButtonDefaults.outlinedButtonBorder.copy(
                                     brush = Brush.linearGradient(listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0.4f)))
                                 ),
-                                modifier = Modifier.heightIn(min = 48.dp),
+                                modifier = Modifier.heightIn(min = 48.dp).semantics {
+                                    contentDescription = "화면 설정: 영상 정렬 및 화면 비율"
+                                },
                             ) {
                                 Icon(Icons.Default.AspectRatio, null, modifier = Modifier.size(14.dp))
                                 Spacer(Modifier.width(4.dp))
-                                Text(currentAspectMode.shortTitle, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text("화면", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
@@ -1878,18 +1899,23 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         }
 
                         OutlinedButton(
-                            onClick = { cycleAspectRatio() },
+                            onClick = {
+                                controlsTimerJob?.cancel()
+                                showDisplayDialog = true
+                            },
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
                             border = ButtonDefaults.outlinedButtonBorder.copy(
                                 brush = Brush.linearGradient(listOf(Color.White.copy(alpha = 0.4f), Color.White.copy(alpha = 0.4f)))
                             ),
-                            modifier = Modifier.heightIn(min = 48.dp),
+                            modifier = Modifier.heightIn(min = 48.dp).semantics {
+                                contentDescription = "화면 설정: 영상 정렬 및 화면 비율"
+                            },
                         ) {
                             Icon(Icons.Default.AspectRatio, null, modifier = Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text(currentAspectMode.shortTitle, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Text("화면", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
 
@@ -1913,6 +1939,200 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         }
     }
 
+    @Composable
+    private fun DisplayDialog(onDismiss: () -> Unit) {
+        val contentHeight = (LocalConfiguration.current.screenHeightDp.dp * 0.55f).coerceAtMost(360.dp)
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("화면 설정") },
+            text = {
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = contentHeight).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("영상 정렬", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text("화면에 세로 여백이 있을 때 영상 위치를 조절합니다.", style = MaterialTheme.typography.bodySmall)
+                    Column(Modifier.selectableGroup()) {
+                        VideoAlign.entries.forEach { alignment ->
+                            val label = when (alignment) {
+                                VideoAlign.TOP -> "위"
+                                VideoAlign.CENTER -> "중간"
+                                VideoAlign.BOTTOM -> "아래"
+                            }
+                            DisplayChoice(label, currentVideoAlign == alignment) { selectVideoAlign(alignment) }
+                        }
+                    }
+                    HorizontalDivider()
+                    Text("화면 비율", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Column(Modifier.selectableGroup()) {
+                        AspectRatioMode.entries.forEach { mode ->
+                            DisplayChoice(mode.title, currentAspectMode == mode) { selectAspectRatio(mode) }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("닫기") } },
+        )
+    }
+
+    @Composable
+    private fun DisplayChoice(label: String, selected: Boolean, onClick: () -> Unit) {
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                .selectable(selected = selected, onClick = onClick, role = Role.RadioButton)
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected, onClick = null)
+            Spacer(Modifier.width(8.dp))
+            Text(label, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+        }
+    }
+
+    @Composable
+    private fun SubtitleColorSwatch(hex: String, name: String, selected: Boolean, onClick: () -> Unit) {
+        val color = remember(hex) { Color(android.graphics.Color.parseColor(hex)) }
+        val hsv = remember(hex) { FloatArray(3).also { android.graphics.Color.colorToHSV(android.graphics.Color.parseColor(hex), it) } }
+        Box(
+            Modifier.size(48.dp).clip(CircleShape)
+                .selectable(selected = selected, onClick = onClick, role = Role.RadioButton)
+                .semantics { contentDescription = name },
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
+                Modifier.size(40.dp)
+                    .then(if (selected) Modifier.border(2.dp, MaterialTheme.colorScheme.primary, CircleShape) else Modifier),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier.size(30.dp).clip(CircleShape).background(color)
+                        .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (selected) {
+                        Icon(
+                            Icons.Default.Check, null,
+                            tint = if (hsv[2] > 0.65f && (hsv[1] < 0.4f || hsv[0] in 35f..180f)) Color.Black else Color.White,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun SubtitlePaletteDialog(initialColor: String, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+        val initialHsv = remember {
+            FloatArray(3).also { android.graphics.Color.colorToHSV(android.graphics.Color.parseColor(initialColor), it) }
+        }
+        var hue by remember { mutableFloatStateOf(initialHsv[0]) }
+        var saturation by remember { mutableFloatStateOf(initialHsv[1]) }
+        var brightness by remember { mutableFloatStateOf(initialHsv[2]) }
+        val hsv = remember { FloatArray(3) }
+        val draftArgb = remember(hue, saturation, brightness) {
+            hsv[0] = hue
+            hsv[1] = saturation
+            hsv[2] = brightness
+            android.graphics.Color.HSVToColor(hsv)
+        }
+        val draftHex = remember(draftArgb) {
+            String.format(java.util.Locale.ROOT, "#%06X", draftArgb and 0xFFFFFF)
+        }
+        val draftColor = Color(draftArgb)
+        val colors = remember {
+            listOf(
+                "#FFFFFF" to "흰색", "#E0E0E0" to "밝은 회색", "#808080" to "회색", "#404040" to "진한 회색",
+                "#000000" to "검은색", "#FFF4D6" to "크림색", "#FFFF00" to "노란색", "#FFC107" to "황금색",
+                "#FF9800" to "주황색", "#FF5252" to "빨간색", "#FF80C0" to "분홍색", "#E040FB" to "자홍색",
+                "#B388FF" to "연보라색", "#7C4DFF" to "보라색", "#448AFF" to "파란색", "#80D8FF" to "연한 하늘색",
+                "#00FFFF" to "하늘색", "#64FFDA" to "민트색", "#00FF00" to "초록색", "#B2FF59" to "연두색",
+            )
+        }
+        val contentHeight = (LocalConfiguration.current.screenHeightDp.dp * 0.55f).coerceAtMost(420.dp)
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("자막 색상 팔레트") },
+            text = {
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = contentHeight).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text("색상을 고르거나 아래 슬라이더로 조절하세요.", style = MaterialTheme.typography.bodySmall)
+                    Text("선택 색상 미리보기", style = MaterialTheme.typography.titleSmall)
+                    Box(
+                        Modifier.fillMaxWidth().heightIn(min = 64.dp).clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF202020)).padding(12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("자막 미리보기", color = draftColor, fontWeight = FontWeight.Bold)
+                    }
+                    Box(
+                        Modifier.size(48.dp).clip(CircleShape).background(draftColor)
+                            .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
+                            .semantics { contentDescription = "선택한 색상" },
+                    )
+                    FlowRow(
+                        Modifier.fillMaxWidth().selectableGroup(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        colors.forEach { (hex, name) ->
+                            SubtitleColorSwatch(hex, name, hex.equals(draftHex, true)) {
+                                val hsv = FloatArray(3)
+                                android.graphics.Color.colorToHSV(android.graphics.Color.parseColor(hex), hsv)
+                                hue = hsv[0]
+                                saturation = hsv[1]
+                                brightness = hsv[2]
+                            }
+                        }
+                    }
+                    Text("색조", style = MaterialTheme.typography.titleSmall)
+                    Slider(
+                        value = hue, onValueChange = { hue = it }, valueRange = 0f..360f,
+                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "색조" }.heightIn(min = 48.dp),
+                        thumb = {
+                            Box(Modifier.size(width = 20.dp, height = 48.dp), contentAlignment = Alignment.Center) {
+                                SliderDefaults.Thumb(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        },
+                    )
+                    Text("채도", style = MaterialTheme.typography.titleSmall)
+                    Slider(
+                        value = saturation, onValueChange = { saturation = it }, valueRange = 0f..1f,
+                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "채도" }.heightIn(min = 48.dp),
+                        thumb = {
+                            Box(Modifier.size(width = 20.dp, height = 48.dp), contentAlignment = Alignment.Center) {
+                                SliderDefaults.Thumb(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        },
+                    )
+                    Text("밝기", style = MaterialTheme.typography.titleSmall)
+                    Slider(
+                        value = brightness, onValueChange = { brightness = it }, valueRange = 0f..1f,
+                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "밝기" }.heightIn(min = 48.dp),
+                        thumb = {
+                            Box(Modifier.size(width = 20.dp, height = 48.dp), contentAlignment = Alignment.Center) {
+                                SliderDefaults.Thumb(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    modifier = Modifier.size(20.dp),
+                                )
+                            }
+                        },
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { onConfirm(draftHex) }, modifier = Modifier.heightIn(min = 48.dp)) { Text("적용") } },
+            dismissButton = { TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("취소") } },
+        )
+    }
+
     // ---------------------------------------------------------------- Subtitle Dialog
 
     @Composable
@@ -1931,23 +2151,26 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         onDismiss: () -> Unit,
     ) {
         val currentSelectedId = tracks.find { it.isSelected }?.id ?: -1
+        var showPalette by remember { mutableStateOf(false) }
+        val contentHeight = (LocalConfiguration.current.screenHeightDp.dp * 0.55f).coerceAtMost(360.dp)
         AlertDialog(
             onDismissRequest = onDismiss,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Subtitles, null, tint = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.width(8.dp))
-                    Text("자막 선택")
+                    Text("자막 설정")
                 }
             },
             text = {
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 360.dp)
+                        .heightIn(max = contentHeight)
                         .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Text("자막 트랙 목록", style = MaterialTheme.typography.titleSmall, color = Color.Gray)
+                    Text("자막 트랙", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(4.dp))
 
                     Column(Modifier.selectableGroup()) {
@@ -1998,13 +2221,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     Spacer(Modifier.height(12.dp))
                     OutlinedButton(
                         onClick = onLoadExternalSub,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                         shape = RoundedCornerShape(8.dp),
                     ) {
                         Icon(Icons.Default.Add, null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("외부 자막 파일 불러오기 (.srt, .vtt, .ass)")
+                        Text("외부 자막 파일 불러오기")
                     }
+                    Text("지원 형식: .srt, .vtt, .ass", style = MaterialTheme.typography.bodySmall)
 
                     Spacer(Modifier.height(16.dp))
                     HorizontalDivider()
@@ -2012,7 +2236,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
                     // Subtitle style: size + color (applied live, persisted)
                     Text(
-                        "자막 스타일: 크기 ${fontSize.roundToInt()}",
+                        "글자 크기: ${fontSize.roundToInt()}",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -2022,39 +2246,31 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         onValueChange = { onFontSizeChange(it.toDouble()) },
                         onValueChangeFinished = { onFontSizeFinal() },
                         valueRange = 20f..120f,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics {
+                            contentDescription = "자막 글자 크기"
+                        },
                     )
                     Spacer(Modifier.height(4.dp))
-                    Row(
-                        Modifier.fillMaxWidth(),
+                    Text("글자 색상", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    FlowRow(
+                        Modifier.fillMaxWidth().selectableGroup(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        SettingsRepo.SUB_COLOR_PRESETS.forEach { hex ->
-                            val selected = hex.equals(subColor, ignoreCase = true)
-                            FilterChip(
-                                selected = selected,
-                                onClick = { onSubColor(hex) },
-                                label = {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(
-                                            Modifier
-                                                .size(14.dp)
-                                                .clip(RoundedCornerShape(7.dp))
-                                                .background(
-                                                    runCatching {
-                                                        Color(
-                                                            hex.removePrefix("#").toLong(16).toInt() or 0xFF000000.toInt(),
-                                                        )
-                                                    }.getOrDefault(Color.White),
-                                                ),
-                                        )
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(hex)
-                                    }
-                                },
-                                shape = RoundedCornerShape(8.dp),
-                            )
+                        val names = listOf("흰색", "노란색", "하늘색", "초록색", "분홍색")
+                        SettingsRepo.SUB_COLOR_PRESETS.forEachIndexed { index, hex ->
+                            SubtitleColorSwatch(hex, names[index], hex.equals(subColor, true)) {
+                                onSubColor(hex)
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = { showPalette = true },
+                            modifier = Modifier.heightIn(min = 48.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                        ) {
+                            Icon(Icons.Default.Palette, null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("팔레트")
                         }
                     }
 
@@ -2068,14 +2284,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.height(6.dp))
-                    Row(
+                    FlowRow(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         FilledTonalButton(
                             onClick = { onAdjustDelay(-100.0) },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.heightIn(min = 48.dp),
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(vertical = 4.dp),
                         ) {
@@ -2083,7 +2299,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         }
                         FilledTonalButton(
                             onClick = onResetDelay,
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.heightIn(min = 48.dp),
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(vertical = 4.dp),
                         ) {
@@ -2091,7 +2307,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         }
                         FilledTonalButton(
                             onClick = { onAdjustDelay(100.0) },
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.heightIn(min = 48.dp),
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(vertical = 4.dp),
                         ) {
@@ -2104,6 +2320,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 TextButton(onClick = onDismiss) { Text("닫기") }
             },
         )
+        if (showPalette) {
+            SubtitlePaletteDialog(
+                initialColor = subColor,
+                onConfirm = { color ->
+                    onSubColor(color)
+                    showPalette = false
+                },
+                onDismiss = { showPalette = false },
+            )
+        }
     }
 
     // ---------------------------------------------------------------- Audio Track Dialog
