@@ -1195,6 +1195,9 @@ fun ContinueWatchingPane(
     }
 }
 
+// Folder video list watch-state filter: null = all.
+private enum class WatchFilter { UNSEEN, IN_PROGRESS, WATCHED }
+
 // ---------------------------------------------------------------- Folder
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -1218,7 +1221,7 @@ fun FolderScreen(
     var threshold by remember { mutableStateOf(0.9) }
     var query by remember { mutableStateOf("") }
     var sortByName by remember { mutableStateOf(true) }
-    var unseenOnly by remember { mutableStateOf(false) }
+    var watchFilter by remember { mutableStateOf<WatchFilter?>(null) }
     val scanStatus by LibraryScanner.statuses.collectAsState()
     var thumbScale by remember { mutableStateOf("medium") }
 
@@ -1271,10 +1274,14 @@ fun FolderScreen(
             .sorted()
             .toList()
     }
-    val here = remember(videosByDir, naturalNameKeys, path, query, unseenOnly, sortByName, threshold) {
+    val here = remember(videosByDir, naturalNameKeys, path, query, watchFilter, sortByName, threshold) {
         val filtered = videosByDir[path].orEmpty().filter {
-            (query.isBlank() || it.name.contains(query, ignoreCase = true)) &&
-                (!unseenOnly || !it.isWatched(threshold))
+            (query.isBlank() || it.name.contains(query, ignoreCase = true)) && when (watchFilter) {
+                WatchFilter.UNSEEN -> !it.isWatched(threshold)
+                WatchFilter.IN_PROGRESS -> it.isInProgress(threshold)
+                WatchFilter.WATCHED -> it.isWatched(threshold)
+                null -> true
+            }
         }
         if (sortByName) filtered.sortedBy { naturalNameKeys.getValue(it.uri) }
         else filtered.sortedByDescending { it.lastPlayedAt }
@@ -1408,8 +1415,23 @@ fun FolderScreen(
                         Icon(if (sortByName) Icons.Default.SortByAlpha else Icons.Default.History, "정렬")
                     }
                     FilterChip(
-                        selected = unseenOnly, onClick = { unseenOnly = !unseenOnly },
+                        selected = watchFilter == WatchFilter.UNSEEN,
+                        onClick = { watchFilter = if (watchFilter == WatchFilter.UNSEEN) null else WatchFilter.UNSEEN },
                         label = { Text("미시청", maxLines = 1, softWrap = false) },
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    FilterChip(
+                        selected = watchFilter == WatchFilter.IN_PROGRESS,
+                        onClick = { watchFilter = if (watchFilter == WatchFilter.IN_PROGRESS) null else WatchFilter.IN_PROGRESS },
+                        label = { Text("시청 중", maxLines = 1, softWrap = false) },
+                        modifier = Modifier.align(Alignment.CenterVertically),
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    FilterChip(
+                        selected = watchFilter == WatchFilter.WATCHED,
+                        onClick = { watchFilter = if (watchFilter == WatchFilter.WATCHED) null else WatchFilter.WATCHED },
+                        label = { Text("시청완료", maxLines = 1, softWrap = false) },
                         modifier = Modifier.align(Alignment.CenterVertically),
                         shape = RoundedCornerShape(8.dp),
                     )
