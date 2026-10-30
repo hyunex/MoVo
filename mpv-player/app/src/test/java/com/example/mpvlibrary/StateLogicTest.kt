@@ -7,12 +7,16 @@ import com.example.mpvlibrary.data.VideoEntity
 import com.example.mpvlibrary.data.ContinuePlaylistMode
 import com.example.mpvlibrary.mpv.MpvPath
 import com.example.mpvlibrary.ui.naturalKey
+import com.example.mpvlibrary.ui.EpisodeTag
+import com.example.mpvlibrary.ui.episodeTag
+import com.example.mpvlibrary.ui.episodeOrder
 import com.example.mpvlibrary.ui.buildContinuePlaylist
 import com.example.mpvlibrary.ui.PlaybackEndAction
 import com.example.mpvlibrary.ui.playbackEndAction
 import com.example.mpvlibrary.ui.playbackRemainingSeconds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -261,6 +265,43 @@ class StateLogicTest {
         assertEquals(
             listOf("Episode 1.mkv", "Episode 2.mkv", "Episode 10.mkv"),
             names.sortedBy { naturalKey(it) },
+        )
+    }
+
+    @Test fun episodeTagRecognizesCommonNamingStyles() {
+        assertEquals(EpisodeTag(1, 2), episodeTag("Show.S01E02.1080p.WEB-DL.x264.mkv"))
+        assertEquals(EpisodeTag(2, 10), episodeTag("show s2e10.mp4"))
+        assertEquals(EpisodeTag(1, 5), episodeTag("Show S01 EP05 [ABCDE123].mkv"))
+        assertEquals(EpisodeTag(3, 7), episodeTag("Show - 3x07 - Title.mkv"))
+        assertEquals(EpisodeTag(2, 4), episodeTag("Show Season 2 Episode 4.mkv"))
+        assertEquals(EpisodeTag(1, 12), episodeTag("드라마 시즌1 12화.mp4"))
+        assertEquals(EpisodeTag(null, 8), episodeTag("[Group] Anime - E08 (1080p).mkv"))
+        assertEquals(EpisodeTag(null, 3), episodeTag("예능 3회.mp4"))
+    }
+
+    @Test fun episodeTagIgnoresCodecResolutionAndYearTokens() {
+        assertNull(episodeTag("Movie.2019.1080p.x264.mkv"))
+        assertNull(episodeTag("Clip 1920x1080 h265.mp4"))
+        assertNull(episodeTag("Season Pack S02.mkv"))
+    }
+
+    @Test fun episodeOrderGroupsSeasonsThenEpisodesBeforeUnrecognized() {
+        val names = listOf(
+            "[1080p] Show S02E01.mkv",
+            "Show.S01E10.mkv",
+            "Extras.mkv",
+            "Show S01E02 [x265].mkv",
+            "Show.S01E01.WEB.mkv",
+        )
+        assertEquals(
+            listOf(
+                "Show.S01E01.WEB.mkv",
+                "Show S01E02 [x265].mkv",
+                "Show.S01E10.mkv",
+                "[1080p] Show S02E01.mkv",
+                "Extras.mkv",
+            ),
+            names.sortedWith(episodeOrder({ episodeTag(it) }, { naturalKey(it) })),
         )
     }
 

@@ -1198,6 +1198,17 @@ fun ContinueWatchingPane(
 // Folder video list watch-state filter: null = all.
 private enum class WatchFilter { UNSEEN, IN_PROGRESS, WATCHED }
 
+/** Folder video list order; [value] is the persisted SettingsRepo.folderSort value. */
+private enum class FolderSort(val value: String, val label: String) {
+    NAME("name", "이름순"),
+    EPISODE("episode", "시즌·에피소드순"),
+    RECENT("recent", "최근 재생순");
+
+    companion object {
+        fun fromValue(v: String) = entries.firstOrNull { it.value == v } ?: NAME
+    }
+}
+
 // ---------------------------------------------------------------- Folder
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -1220,7 +1231,8 @@ fun FolderScreen(
     var videos by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
     var threshold by remember { mutableStateOf(0.9) }
     var query by remember { mutableStateOf("") }
-    var sortByName by remember { mutableStateOf(true) }
+    var sortMode by remember { mutableStateOf(FolderSort.NAME) }
+    var showSortMenu by remember { mutableStateOf(false) }
     var watchFilter by remember { mutableStateOf<WatchFilter?>(null) }
     val scanStatus by LibraryScanner.statuses.collectAsState()
     var thumbScale by remember { mutableStateOf("medium") }
@@ -1254,6 +1266,7 @@ fun FolderScreen(
         val s = SettingsRepo(context)
         threshold = s.watchedThreshold.first()
         thumbScale = s.thumbScale.first()
+        sortMode = FolderSort.fromValue(s.folderSort.first())
         launch(Dispatchers.IO) { folder = db.folders().byId(folderId) }
         launch(Dispatchers.IO) { db.videos().observeFolder(folderId).collect { videos = it } }
         launch(Dispatchers.IO) { s.thumbScale.collect { thumbScale = it } }
@@ -1264,6 +1277,7 @@ fun FolderScreen(
 
     val videosByDir = remember(videos) { videos.groupBy { it.dirPath } }
     val naturalNameKeys = remember(videos) { videos.associate { it.uri to naturalKey(it.name) } }
+    val episodeTags = remember(videos) { videos.associate { it.uri to episodeTag(it.name) } }
     val subDirs = remember(videosByDir, path) {
         val prefix = if (path.isEmpty()) "" else "$path/"
         videosByDir.keys.asSequence()
@@ -1274,7 +1288,7 @@ fun FolderScreen(
             .sorted()
             .toList()
     }
-    val here = remember(videosByDir, naturalNameKeys, path, query, watchFilter, sortByName, threshold) {
+    val here = remember(videosByDir, naturalNameKeys, episodeTags, path, query, watchFilter, sortMode, threshold) {
         val filtered = videosByDir[path].orEmpty().filter {
             (query.isBlank() || it.name.contains(query, ignoreCase = true)) && when (watchFilter) {
                 WatchFilter.UNSEEN -> !it.isWatched(threshold)
@@ -1283,8 +1297,13 @@ fun FolderScreen(
                 null -> true
             }
         }
-        if (sortByName) filtered.sortedBy { naturalNameKeys.getValue(it.uri) }
-        else filtered.sortedByDescending { it.lastPlayedAt }
+        when (sortMode) {
+            FolderSort.NAME -> filtered.sortedBy { naturalNameKeys.getValue(it.uri) }
+            FolderSort.EPISODE -> filtered.sortedWith(
+                episodeOrder({ episodeTags[it.uri] }, { naturalNameKeys.getValue(it.uri) })
+            )
+            FolderSort.RECENT -> filtered.sortedByDescending { it.lastPlayedAt }
+        }
     }
     val allUris = remember(here) { here.map { it.uri } }
 
@@ -1408,11 +1427,36 @@ fun FolderScreen(
                             }
                         },
                     )
-                    IconButton(
-                        onClick = { sortByName = !sortByName },
-                        modifier = Modifier.align(Alignment.CenterVertically),
-                    ) {
-                        Icon(if (sortByName) Icons.Default.SortByAlpha else Icons.Default.History, "정렬")
+                    Box(Modifier.align(Alignment.CenterVertically)) {
+                        IconButton(
+                            onClick = { showSortMenu = true },
+                            modifier = Modifier.semantics { stateDescription = sortMode.label },
+                        ) {
+                            Icon(
+                                when (sortMode) {
+                                    FolderSort.NAME -> Icons.Default.SortByAlpha
+                                    FolderSort.EPISODE -> Icons.Default.FormatListNumbered
+                                    FolderSort.RECENT -> Icons.Default.History
+                                },
+                                "정렬",
+                            )
+                        }
+                        DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                            FolderSort.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label) },
+                                    leadingIcon = {
+                                        if (option == sortMode) Icon(Icons.Default.Check, null)
+                                    },
+                                    onClick = {
+                                        sortMode = option
+                                        showSortMenu = false
+                                        scope.launch { SettingsRepo(context).setFolderSort(option.value) }
+                                    },
+                                    modifier = Modifier.semantics { selected = option == sortMode },
+                                )
+                            }
+                        }
                     }
                     FilterChip(
                         selected = watchFilter == WatchFilter.UNSEEN,
@@ -1448,7 +1492,9 @@ fun FolderScreen(
                 modifier = Modifier.weight(1f),
                 onRefresh = { scanner.scanAll(retryMetadata = true) },
             ) {
-                LazyColumn(Modifier.fillMaxSize()) {
+                val listState = rememberLazyListState()
+                LaunchedEffect(sortMode) { listState.scrollToItem(0) }
+                LazyColumn(Modifier.fillMaxSize(), state = listState) {
                     if (subDirs.isNotEmpty()) {
                         items(subDirs, key = { "d$folderId$it" }) { d ->
                             Row(
@@ -2904,6 +2950,41 @@ fun naturalKey(name: String): String {
     }
     return sb.toString()
 }
+
+/** Season/episode recognized from a file name; [season] is null when only an episode number is present. */
+data class EpisodeTag(val season: Int?, val episode: Int)
+
+// Boundaries keep codec/resolution tokens (x264, 1080p, 1920x1080) and hashes from matching.
+private val SXE_PATTERN = Regex("""(?<![a-z0-9])s(\d{1,3})[ ._-]*e(?:p)?[ ._-]*(\d{1,4})(?!\d)""", RegexOption.IGNORE_CASE)
+private val NXN_PATTERN = Regex("""(?<![a-z0-9])(\d{1,2})x(\d{1,3})(?![a-z0-9])""", RegexOption.IGNORE_CASE)
+private val SEASON_WORD_PATTERN = Regex("""(?<![a-z0-9])(?:season|시즌)[ ._-]*(\d{1,3})(?!\d)""", RegexOption.IGNORE_CASE)
+private val EPISODE_WORD_PATTERN = Regex("""(?<![a-z0-9])(?:episode|ep|e)[ ._-]*(\d{1,4})(?!\d)""", RegexOption.IGNORE_CASE)
+private val KOREAN_EPISODE_PATTERN = Regex("""(?<!\d)(\d{1,4})[ ]*[화회]""")
+
+/**
+ * Recognizes S01E02, s1.e2, S01 EP02, 1x02, "Season 1 Episode 2", "시즌1 2화", E05/EP05, "5화".
+ * Returns null when no episode number is found.
+ */
+fun episodeTag(name: String): EpisodeTag? {
+    val base = name.substringBeforeLast('.')
+    SXE_PATTERN.find(base)?.let { m ->
+        return EpisodeTag(m.groupValues[1].toInt(), m.groupValues[2].toInt())
+    }
+    NXN_PATTERN.find(base)?.let { m ->
+        return EpisodeTag(m.groupValues[1].toInt(), m.groupValues[2].toInt())
+    }
+    val episode = (EPISODE_WORD_PATTERN.find(base) ?: KOREAN_EPISODE_PATTERN.find(base))
+        ?.groupValues?.get(1)?.toInt() ?: return null
+    val season = SEASON_WORD_PATTERN.find(base)?.groupValues?.get(1)?.toInt()
+    return EpisodeTag(season, episode)
+}
+
+/**
+ * Season → episode order. Episode-only names sort as season 0 ahead of numbered seasons;
+ * unrecognized names follow, in natural name order.
+ */
+fun <T> episodeOrder(tag: (T) -> EpisodeTag?, natural: (T) -> String): Comparator<T> =
+    compareBy<T>({ tag(it) == null }, { tag(it)?.season ?: 0 }, { tag(it)?.episode ?: 0 }, { natural(it) })
 
 /**
  * Builds playlist uris and start index for continue-watching playback.

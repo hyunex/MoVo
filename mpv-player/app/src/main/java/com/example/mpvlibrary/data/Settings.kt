@@ -87,6 +87,8 @@ class SettingsRepo(private val context: Context) {
         val KEY_SUB_FONT_SIZE = doublePreferencesKey("sub_font_size")
         val KEY_SUB_COLOR = stringPreferencesKey("sub_color")
         val KEY_THUMB_SCALE = stringPreferencesKey("thumb_scale")
+        val KEY_FOLDER_SORT = stringPreferencesKey("folder_sort")
+        val FOLDER_SORT_VALUES = setOf("name", "episode", "recent")
 
         const val DEFAULT_SUB_FONT_SIZE = 55.0
         const val DEFAULT_SUB_COLOR = "#FFFFFF"
@@ -370,5 +372,10 @@ class SettingsRepo(private val context: Context) {
 
     suspend fun setThumbScale(v: String) {
         context.dataStore.edit { it[KEY_THUMB_SCALE] = if (v in setOf("small", "medium", "large")) v else "medium" }
+    }
+    val folderSort: Flow<String> = context.dataStore.data.map { it[KEY_FOLDER_SORT]?.takeIf { v -> v in FOLDER_SORT_VALUES } ?: "name" }
+
+    suspend fun setFolderSort(v: String) {
+        context.dataStore.edit { it[KEY_FOLDER_SORT] = if (v in FOLDER_SORT_VALUES) v else "name" }
     }
 }

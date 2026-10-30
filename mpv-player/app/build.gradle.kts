@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.mpvlibrary"
         minSdk = 26
         targetSdk = 34
-        versionCode = 35
-        versionName = "1.0.34"
+        versionCode = 36
+        versionName = "1.0.35"
         vectorDrawables { useSupportLibrary = true }
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
