@@ -232,6 +232,9 @@ class LibraryScanner(private val context: Context) {
         for (folder in db.folders().all()) scan(folder, retryMetadata)
     }
 
+    /** A scan commits a tree snapshot taken before its transaction; deletes run here so a running scan cannot re-insert them. */
+    suspend fun <T> exclusive(block: suspend () -> T): T = scanMutex.withLock { block() }
+
     private suspend fun walk(tree: Uri, directory: Uri, prefix: String, depth: Int, found: MutableList<ScannedVideo>, identities: ScanDocumentTracker) {
         val directoryId = DocumentsContract.getDocumentId(directory)
         if (!identities.enterDirectory(directoryId)) return

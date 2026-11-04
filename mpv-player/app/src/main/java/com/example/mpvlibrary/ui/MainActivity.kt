@@ -859,70 +859,72 @@ class SafeDeleteState(
             val failedUris = mutableListOf<String>()
             val securityDeniedUris = mutableSetOf<String>()
 
-            for (entity in entities) {
-                val u = entity.uri
-                val parsed = Uri.parse(u)
-                val f = foldersById[entity.folderId]
-                if (f != null) {
-                    runCatching { LibraryScanner.takePermission(context, Uri.parse(f.treeUri)) }
-                }
-                var success = false
-                if (!success) {
-                    val contractRes = runCatching {
-                        DocumentsContract.deleteDocument(context.contentResolver, parsed)
+            val successfullyDeleted = scanner.exclusive {
+                for (entity in entities) {
+                    val u = entity.uri
+                    val parsed = Uri.parse(u)
+                    val f = foldersById[entity.folderId]
+                    if (f != null) {
+                        runCatching { LibraryScanner.takePermission(context, Uri.parse(f.treeUri)) }
                     }
-                    if (contractRes.isSuccess && contractRes.getOrNull() == true) {
-                        success = true
-                    } else if (contractRes.exceptionOrNull() is SecurityException) {
-                        securityDeniedUris.add(u)
+                    var success = false
+                    if (!success) {
+                        val contractRes = runCatching {
+                            DocumentsContract.deleteDocument(context.contentResolver, parsed)
+                        }
+                        if (contractRes.isSuccess && contractRes.getOrNull() == true) {
+                            success = true
+                        } else if (contractRes.exceptionOrNull() is SecurityException) {
+                            securityDeniedUris.add(u)
+                        }
                     }
-                }
-                if (!success) {
-                    val docRes = runCatching {
-                        DocumentFile.fromSingleUri(context, parsed)?.delete() == true
+                    if (!success) {
+                        val docRes = runCatching {
+                            DocumentFile.fromSingleUri(context, parsed)?.delete() == true
+                        }
+                        if (docRes.isSuccess && docRes.getOrNull() == true) {
+                            success = true
+                        } else if (docRes.exceptionOrNull() is SecurityException) {
+                            securityDeniedUris.add(u)
+                        }
                     }
-                    if (docRes.isSuccess && docRes.getOrNull() == true) {
-                        success = true
-                    } else if (docRes.exceptionOrNull() is SecurityException) {
-                        securityDeniedUris.add(u)
-                    }
-                }
-                if (!success) {
-                    val treeRes = runCatching {
-                        if (f != null) {
-                            val root = DocumentFile.fromTreeUri(context, Uri.parse(f.treeUri))
-                            if (root != null) {
-                                var dir: DocumentFile? = root
-                                if (entity.dirPath.isNotEmpty()) {
-                                    for (seg in entity.dirPath.split('/')) {
-                                        if (seg.isEmpty() || seg == "." || seg == "..") continue
-                                        dir = dir?.findFile(seg)
-                                        if (dir == null) break
+                    if (!success) {
+                        val treeRes = runCatching {
+                            if (f != null) {
+                                val root = DocumentFile.fromTreeUri(context, Uri.parse(f.treeUri))
+                                if (root != null) {
+                                    var dir: DocumentFile? = root
+                                    if (entity.dirPath.isNotEmpty()) {
+                                        for (seg in entity.dirPath.split('/')) {
+                                            if (seg.isEmpty() || seg == "." || seg == "..") continue
+                                            dir = dir?.findFile(seg)
+                                            if (dir == null) break
+                                        }
                                     }
-                                }
-                                dir?.findFile(entity.name)?.delete() == true
+                                    dir?.findFile(entity.name)?.delete() == true
+                                } else false
                             } else false
-                        } else false
+                        }
+                        if (treeRes.isSuccess && treeRes.getOrNull() == true) {
+                            success = true
+                        } else if (treeRes.exceptionOrNull() is SecurityException) {
+                            securityDeniedUris.add(u)
+                        }
                     }
-                    if (treeRes.isSuccess && treeRes.getOrNull() == true) {
-                        success = true
-                    } else if (treeRes.exceptionOrNull() is SecurityException) {
-                        securityDeniedUris.add(u)
+                    if (success) {
+                        deletedCount++
+                        AppLog.i("library", "file deleted via SAF: $u")
+                    } else {
+                        failedCount++
+                        failedUris.add(u)
+                        AppLog.w("library", "file SAF delete failed: $u")
                     }
                 }
-                if (success) {
-                    deletedCount++
-                    AppLog.i("library", "file deleted via SAF: $u")
-                } else {
-                    failedCount++
-                    failedUris.add(u)
-                    AppLog.w("library", "file SAF delete failed: $u")
+                (targets - failedUris.toSet()).also {
+                    if (it.isNotEmpty()) db.videos().deleteByUris(it)
                 }
             }
-
-            val successfullyDeleted = targets - failedUris.toSet()
             if (successfullyDeleted.isNotEmpty()) {
-                db.videos().deleteByUris(successfullyDeleted)
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                     onDeleteSuccess?.invoke(successfullyDeleted)
                 }
