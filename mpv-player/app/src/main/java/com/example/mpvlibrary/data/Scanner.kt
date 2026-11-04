@@ -30,6 +30,10 @@ data class ScanStatus(val running: Boolean, val completed: Boolean, val error: S
 
 private data class ScannedVideo(val uri: String, val name: String, val dirPath: String, val size: Long, val modified: Long, val hasExternalSubtitles: Boolean = false)
 private class IncompleteScan(message: String) : Exception(message)
+
+/** The `path=` label lets exported debug reports mask the user's folder names. */
+internal fun incompleteScanMessage(reason: String, folderPath: String) = "$reason (path=$folderPath)"
+
 private class CompletedScanAttempt(val treeUri: String)
 
 /** Document IDs are provider identities, not paths. Completed aliases need no second query. */
@@ -235,16 +239,16 @@ class LibraryScanner(private val context: Context) {
     private suspend fun walk(tree: Uri, directory: Uri, prefix: String, depth: Int, found: MutableList<ScannedVideo>, identities: ScanDocumentTracker) {
         val directoryId = DocumentsContract.getDocumentId(directory)
         if (!identities.enterDirectory(directoryId)) return
-        if (depth > MAX_SCAN_DEPTH) throw IncompleteScan("폴더 깊이 제한 초과: $prefix")
+        if (depth > MAX_SCAN_DEPTH) throw IncompleteScan(incompleteScanMessage("폴더 깊이 제한 초과", prefix))
         val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, directoryId)
         val cursor = queryChildren(childrenUri)
-            ?: throw IncompleteScan("폴더 목록을 읽을 수 없습니다: $prefix")
+            ?: throw IncompleteScan(incompleteScanMessage("폴더 목록을 읽을 수 없습니다", prefix))
         val siblingNames = ArrayList<String>()
         val directoryVideos = ArrayList<ScannedVideo>()
         cursor.use {
             currentCoroutineContext().ensureActive()
             if (it.extras.getBoolean(DocumentsContract.EXTRA_LOADING, false)) {
-                throw IncompleteScan("폴더 목록을 아직 불러오는 중입니다: $prefix")
+                throw IncompleteScan(incompleteScanMessage("폴더 목록을 아직 불러오는 중입니다", prefix))
             }
             val idCol = it.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
             val nameCol = it.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
@@ -272,7 +276,7 @@ class LibraryScanner(private val context: Context) {
                 }
             }
             if (it.extras.getBoolean(DocumentsContract.EXTRA_LOADING, false)) {
-                throw IncompleteScan("폴더 목록을 아직 불러오는 중입니다: $prefix")
+                throw IncompleteScan(incompleteScanMessage("폴더 목록을 아직 불러오는 중입니다", prefix))
             }
         }
         for (video in directoryVideos) {

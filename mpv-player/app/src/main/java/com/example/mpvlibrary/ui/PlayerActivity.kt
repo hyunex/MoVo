@@ -1329,16 +1329,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 val listing = dir.listFiles().mapNotNull { doc -> doc.name?.let { it to doc } }.toMap()
                 val matches = MpvPath.matchSubtitles(entity.name, listing.keys.toList()).take(MAX_AUTO_SUBTITLES)
                 if (matches.isEmpty()) return@launch
-                AppLog.i(TAG, "auto-sub found ${matches.size}: ${matches.joinToString()}")
+                AppLog.i(TAG, "auto-sub found ${matches.size}")
                 // Real file paths: mpv subtitle demuxers often reject fd://.
                 val cached = matches.mapNotNull { name ->
-                    MpvPath.cacheCopy(this@PlayerActivity, listing.getValue(name).uri, name)?.let { name to it }
+                    MpvPath.cacheCopy(this@PlayerActivity, listing.getValue(name).uri, name)
                 }
                 if (cached.isEmpty()) return@launch
                 withContext(Dispatchers.Main) {
                     if (destroyed || generation != loadGeneration || loadPending) return@withContext
-                    cached.forEachIndexed { i, (name, file) ->
-                        mpv("자막 자동추가 $name") {
+                    cached.forEachIndexed { i, file ->
+                        mpv("자막 자동추가 #${i + 1}") {
                             MPVLib.command(arrayOf("sub-add", file.absolutePath, if (i == 0) "select" else "auto"))
                         }
                     }

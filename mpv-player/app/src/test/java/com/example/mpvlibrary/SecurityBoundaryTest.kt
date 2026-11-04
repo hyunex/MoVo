@@ -2,6 +2,7 @@ package com.example.mpvlibrary
 
 import com.example.mpvlibrary.data.AppLog
 import com.example.mpvlibrary.data.SettingsRepo
+import com.example.mpvlibrary.data.incompleteScanMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -84,5 +85,13 @@ class SecurityBoundaryTest {
         assertTrue(exported.contains("java.io.IOException"))
         assertEquals("I/mpv: dropped frames=0\n    at com.example.Player.load(Player.kt:42)",
             AppLog.maskPaths("I/mpv: dropped frames=0\n    at com.example.Player.load(Player.kt:42)"))
+    }
+
+    @Test fun incompleteScanExportsMaskFolderNames() {
+        val logged = "W/library: scan incomplete for folder 3: " +
+            incompleteScanMessage("폴더 목록을 아직 불러오는 중입니다", "Movies/MOVO_FAKE_SENTINEL")
+        val exported = AppLog.maskPaths(logged)
+        assertFalse(exported.contains("MOVO_FAKE_SENTINEL"))
+        assertTrue(exported.contains("폴더 목록을 아직 불러오는 중입니다"))
     }
 }
