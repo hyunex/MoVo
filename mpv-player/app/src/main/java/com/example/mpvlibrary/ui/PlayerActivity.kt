@@ -349,7 +349,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         // P0: pause when headphones disconnect
         noisyReceiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
-                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && !isPaused && initialized && !isFinishing) {
+                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && playbackIntent.wantsPlay && initialized && !isFinishing) {
                     AppLog.i(TAG, "headset disconnected — auto pause")
                     setUserPlayback(false)
                 }
