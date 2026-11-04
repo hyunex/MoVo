@@ -1094,11 +1094,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         session.setMetadata(metadata)
     }
 
-    private fun seekRelative(deltaSec: Double) {
+    private fun seekRelative(deltaSec: Double, shownSec: Double = deltaSec) {
         val maxTarget = if (duration > 0) (duration - 0.5).coerceAtLeast(0.0) else 0.0
         val target = if (duration > 0) (position + deltaSec).coerceIn(0.0, maxTarget) else (position + deltaSec).coerceAtLeast(0.0)
         seekTo(target)
-        showHud(HudMode.DOUBLE_TAP, if (deltaSec >= 0) "⏩ +${deltaSec.toInt()}초" else "⏪ ${deltaSec.toInt()}초")
+        showHud(HudMode.DOUBLE_TAP, if (shownSec >= 0) "⏩ +${shownSec.toInt()}초" else "⏪ ${shownSec.toInt()}초")
         resetControlsTimer()
     }
 
@@ -1343,8 +1343,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         var startSeekPosition by remember { mutableDoubleStateOf(0.0) }
         var currentSeekTarget by remember { mutableDoubleStateOf(0.0) }
 
-        var lastTapTime by remember { mutableLongStateOf(0L) }
-        var lastTapPos by remember { mutableStateOf(Offset.Zero) }
+        val taps = remember { TapSequence() }
         var singleTapJob by remember { mutableStateOf<Job?>(null) }
 
         Box(
@@ -1483,23 +1482,22 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                             }
                         } else if (!gestureDetermined) {
                             // Tap / Double-tap detection
-                            val now = System.currentTimeMillis()
-                            if (now - lastTapTime < 320 && (downPos - lastTapPos).getDistance() < 120f) {
-                                // Double tap!
-                                singleTapJob?.cancel()
-                                lastTapTime = 0L
-                                when {
-                                    downPos.x < viewWidth * 0.33f -> seekRelative(-tapSeekSec)
-                                    downPos.x > viewWidth * 0.67f -> seekRelative(tapSeekSec)
-                                    else -> togglePlayPause()
+                            when (val tap = taps.onTap(System.currentTimeMillis(), downPos.x, downPos.y, viewWidth, tapSeekSec)) {
+                                is TapAction.Seek -> {
+                                    singleTapJob?.cancel()
+                                    seekRelative(tap.deltaSec, tap.totalSec)
                                 }
-                            } else {
-                                lastTapTime = now
-                                lastTapPos = downPos
-                                singleTapJob = lifecycleScope.launch {
-                                    delay(300)
-                                    controlsVisible = !controlsVisible
-                                    resetControlsTimer()
+                                TapAction.TogglePause -> {
+                                    singleTapJob?.cancel()
+                                    togglePlayPause()
+                                }
+                                TapAction.Pending -> {
+                                    singleTapJob?.cancel()
+                                    singleTapJob = lifecycleScope.launch {
+                                        delay(DOUBLE_TAP_TIMEOUT_MS)
+                                        controlsVisible = !controlsVisible
+                                        resetControlsTimer()
+                                    }
                                 }
                             }
                         }
@@ -2839,5 +2837,47 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private fun fmt(sec: Double): String {
         val s = sec.toInt().coerceAtLeast(0)
         return "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60)
+    }
+}
+
+/** Window for a second tap; the pending single tap fires after the same delay, so a tap is never both. */
+const val DOUBLE_TAP_TIMEOUT_MS = 320L
+
+sealed interface TapAction {
+    data object Pending : TapAction
+    data object TogglePause : TapAction
+    data class Seek(val deltaSec: Double, val totalSec: Double) : TapAction
+}
+
+/** Classifies taps; like VLC, each further tap on the same side within the window adds another seek step. */
+class TapSequence {
+    private var lastTime = Long.MIN_VALUE
+    private var lastX = 0f
+    private var lastY = 0f
+    private var seekSide = 0
+    private var seekTotal = 0.0
+
+    fun onTap(timeMs: Long, x: Float, y: Float, width: Float, stepSec: Double): TapAction {
+        val side = when {
+            x < width * 0.33f -> -1
+            x > width * 0.67f -> 1
+            else -> 0
+        }
+        val inWindow = lastTime != Long.MIN_VALUE && timeMs - lastTime < DOUBLE_TAP_TIMEOUT_MS
+        val continuesSeek = inWindow && seekSide != 0 && side == seekSide
+        val isDouble = inWindow && seekSide == 0 && kotlin.math.hypot(x - lastX, y - lastY) < 120f
+        if (continuesSeek || isDouble) {
+            if (side == 0) {
+                lastTime = Long.MIN_VALUE
+                return TapAction.TogglePause
+            }
+            seekTotal = if (continuesSeek) seekTotal + side * stepSec else side * stepSec
+            seekSide = side
+            lastTime = timeMs
+            return TapAction.Seek(side * stepSec, seekTotal)
+        }
+        lastTime = timeMs; lastX = x; lastY = y
+        seekSide = 0
+        return TapAction.Pending
     }
 }
