@@ -2,6 +2,7 @@ package com.example.mpvlibrary
 
 import com.example.mpvlibrary.data.ScanDocumentTracker
 import com.example.mpvlibrary.data.VideoEntity
+import com.example.mpvlibrary.ui.videosInView
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -33,6 +34,21 @@ class LibraryBehaviorTest {
         // A completed probe blocks an older queued request, even for the same file.
         assertFalse(requested.copy(metadataChecked = true, hasEmbeddedSubtitles = false)
             .needsMetadataProbe(requested))
+    }
+
+    @Test fun searchFindsNameMatchesInEveryFolderBelowTheCurrentPath() {
+        fun at(dir: String, name: String) = video().copy(uri = "content://fixture/$dir/$name", dirPath = dir, name = name)
+        val rootHit = at("", "Ep01.mkv")
+        val nestedHit = at("Anime/Season 1", "ep02.mkv")
+        val nestedMiss = at("Anime/Season 1", "OP.mkv")
+        val prefixSibling = at("AnimeExtras", "Ep03.mkv")
+        val library = listOf(rootHit, nestedHit, nestedMiss, prefixSibling)
+
+        assertEquals(setOf(rootHit, nestedHit, prefixSibling), videosInView(library, "", "EP").toSet())
+        assertEquals(listOf(nestedHit), videosInView(library, "Anime", "ep"))
+        // Without a query the view stays the current directory; subfolders are browsed.
+        assertEquals(listOf(rootHit), videosInView(library, "", ""))
+        assertEquals(listOf(nestedHit, nestedMiss), videosInView(library, "Anime/Season 1", " "))
     }
 
     @Test fun activeAncestorCycleFailsInsteadOfCompletingPartialInventory() {

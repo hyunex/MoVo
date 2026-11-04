@@ -1253,7 +1253,9 @@ fun FolderScreen(
     val videosByDir = remember(videos) { videos.groupBy { it.dirPath } }
     val naturalNameKeys = remember(videos) { videos.associate { it.uri to naturalKey(it.name) } }
     val episodeTags = remember(videos) { videos.associate { it.uri to episodeTag(it.name) } }
-    val subDirs = remember(videosByDir, path) {
+    // A query lists matches from every subfolder, so browsing rows would only push results down.
+    val subDirs = remember(videosByDir, path, query) {
+        if (query.isNotBlank()) return@remember emptyList<String>()
         val prefix = if (path.isEmpty()) "" else "$path/"
         videosByDir.keys.asSequence()
             .filter { it.startsWith(prefix) && it != path }
@@ -1263,9 +1265,9 @@ fun FolderScreen(
             .sorted()
             .toList()
     }
-    val here = remember(videosByDir, naturalNameKeys, episodeTags, path, query, watchFilter, sortMode, threshold) {
-        val filtered = videosByDir[path].orEmpty().filter {
-            (query.isBlank() || it.name.contains(query, ignoreCase = true)) && when (watchFilter) {
+    val here = remember(videos, naturalNameKeys, episodeTags, path, query, watchFilter, sortMode, threshold) {
+        val filtered = videosInView(videos, path, query).filter {
+            when (watchFilter) {
                 WatchFilter.UNSEEN -> !it.isWatched(threshold)
                 WatchFilter.IN_PROGRESS -> it.isInProgress(threshold)
                 WatchFilter.WATCHED -> it.isWatched(threshold)
@@ -2909,6 +2911,16 @@ private fun videoAnnouncement(video: VideoEntity): String = buildList {
         add("최근 시청: " + SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date(video.lastPlayedAt)))
     }
 }.joinToString(", ")
+
+/** Rows a folder view lists: its own directory, or with a query every name match beneath it. */
+fun videosInView(videos: List<VideoEntity>, path: String, query: String): List<VideoEntity> {
+    if (query.isBlank()) return videos.filter { it.dirPath == path }
+    val below = "$path/"
+    return videos.filter {
+        (path.isEmpty() || it.dirPath == path || it.dirPath.startsWith(below)) &&
+            it.name.contains(query, ignoreCase = true)
+    }
+}
 
 /** Zero-pad digit runs so "Ep 2" sorts before "Ep 10". */
 fun naturalKey(name: String): String {
