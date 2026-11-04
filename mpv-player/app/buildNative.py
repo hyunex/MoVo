@@ -102,7 +102,7 @@ def main() -> None:
         # Real FFmpeg configure produces public avconfig.h; no FFmpeg code is built.
         run([str(ffmpeg / 'configure'), '--target-os=android', f'--arch={arch}', '--enable-cross-compile', f'--cc={cc}', '--disable-everything', '--disable-autodetect', '--disable-programs', '--disable-doc', '--disable-x86asm', '--disable-inline-asm', '--disable-asm'], config)
         cmd = cxx + ['-std=c++11', '-O2', '-fPIC', '-shared', '-nostdlib++', '-Wl,-soname,libplayer.so', '-Wl,--no-undefined', '-I', str(mpv / 'include'), '-I', str(config), '-I', str(ffmpeg)]
-        cmd += [str(BRIDGE / f'{name}.cpp') for name in ('main', 'render', 'log', 'jni_utils', 'property', 'event', 'media_probe')]
+        cmd += [str(BRIDGE / f'{name}.cpp') for name in ('main', 'render', 'log', 'jni_utils', 'utf16', 'property', 'event', 'media_probe')]
         # Explicit path prevents accidentally linking the NDK libc++ instead
         # of the libc++_shared packaged beside the retained dependencies.
         cmd += ['-L', str(libs), '-lmpv', '-lavformat', '-lavcodec', '-lavutil', str(libs / 'libc++_shared.so'), '-llog', '-latomic', '-landroid', '-o', str(output / 'libplayer.so')]

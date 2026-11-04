@@ -8,7 +8,7 @@
 
 static void sendPropertyUpdateToJava(JNIEnv *env, mpv_event_property *prop)
 {
-    jstring jprop = env->NewStringUTF(prop->name);
+    jstring jprop = new_java_string(env, prop->name);
     jstring jvalue = NULL;
     switch (prop->format) {
     case MPV_FORMAT_NONE:
@@ -27,7 +27,7 @@ static void sendPropertyUpdateToJava(JNIEnv *env, mpv_event_property *prop)
             (jdouble) *(double*)prop->data);
         break;
     case MPV_FORMAT_STRING:
-        jvalue = env->NewStringUTF(*(const char**)prop->data);
+        jvalue = new_java_string(env, *(const char**)prop->data);
         env->CallStaticVoidMethod(mpv_MPVLib, mpv_MPVLib_eventProperty_SS, jprop, jvalue);
         break;
     default:
@@ -62,17 +62,8 @@ static void sendEventToJava(JNIEnv *env, int event)
 
 static void sendLogMessageToJava(JNIEnv *env, mpv_event_log_message *msg)
 {
-    // filter the most obvious cases of invalid utf-8, since Java would choke on it
-    const auto invalid_utf8 = [] (unsigned char c) {
-        return c == 0xc0 || c == 0xc1 || c >= 0xf5;
-    };
-    for (int i = 0; msg->text[i]; i++) {
-        if (invalid_utf8(static_cast<unsigned char>(msg->text[i])))
-            return;
-    }
-
-    jstring jprefix = env->NewStringUTF(msg->prefix);
-    jstring jtext = env->NewStringUTF(msg->text);
+    jstring jprefix = new_java_string(env, msg->prefix);
+    jstring jtext = new_java_string(env, msg->text);
 
     env->CallStaticVoidMethod(mpv_MPVLib, mpv_MPVLib_logMessage_SiS,
         jprefix, (jint) msg->log_level, jtext);
