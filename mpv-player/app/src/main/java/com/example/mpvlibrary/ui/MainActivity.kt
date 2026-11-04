@@ -545,6 +545,7 @@ fun LibraryScreen(
                                     threshold = threshold,
                                     onPlay = playContinueVideo,
                                     onRefresh = { scanner.scanAll(retryMetadata = true) },
+                                    onAddFolder = { picker.launch(null) },
                                     deleteState = deleteState,
                                     modifier = Modifier.padding(pad),
                                     thumbSize = when (thumbScale) {
@@ -681,6 +682,7 @@ fun LibraryScreen(
                                 threshold = threshold,
                                 onPlay = playContinueVideo,
                                 onRefresh = { scanner.scanAll(retryMetadata = true) },
+                                onAddFolder = { picker.launch(null) },
                                 deleteState = deleteState,
                                 thumbSize = when (thumbScale) {
                                     "small" -> 88.dp
@@ -1094,6 +1096,7 @@ fun ContinueWatchingPane(
     threshold: Double,
     onPlay: (VideoEntity) -> Unit,
     onRefresh: suspend () -> Unit,
+    onAddFolder: () -> Unit,
     deleteState: SafeDeleteState,
     modifier: Modifier = Modifier,
     thumbSize: Dp = 116.dp,
@@ -1102,9 +1105,10 @@ fun ContinueWatchingPane(
     val db = remember { AppDb.get(context) }
     val scope = rememberCoroutineScope()
     val scanStatuses by LibraryScanner.statuses.collectAsState()
-    val registeredFolders by remember(db) { db.folders().observeAll() }.collectAsState(initial = emptyList())
+    // null until Room answers, so a returning user never sees the first-run prompt flash.
+    val registeredFolders by remember(db) { db.folders().observeAll() }.collectAsState(initial = null)
     val failedFolders = remember(registeredFolders, scanStatuses) {
-        registeredFolders.filter { scanStatuses[it.id]?.error != null }
+        registeredFolders.orEmpty().filter { scanStatuses[it.id]?.error != null }
     }
 
     PullRefreshWrapper(
@@ -1132,7 +1136,19 @@ fun ContinueWatchingPane(
                     .verticalScroll(rememberScrollState()),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("이어볼 영상이 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
+                if (registeredFolders?.isEmpty() == true) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("등록된 영상 폴더가 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = onAddFolder) {
+                            Icon(Icons.Default.CreateNewFolder, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("영상 폴더 등록")
+                        }
+                    }
+                } else {
+                    Text("이어볼 영상이 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
+                }
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
@@ -1489,45 +1505,48 @@ fun FolderScreen(
                             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                         }
                     }
-                    if (subDirs.isEmpty() && here.isEmpty()) {
+                    val emptyMessage = when {
+                        here.isNotEmpty() -> null
+                        query.isNotBlank() || watchFilter != null -> "조건에 맞는 영상이 없습니다"
+                        subDirs.isNotEmpty() -> null
+                        path.isEmpty() -> "영상이 없습니다. 새로고침(⟳)해 보세요."
+                        else -> "이 폴더에 영상이 없습니다."
+                    }
+                    if (emptyMessage != null) {
                         item {
                             Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                                Text(
-                                    if (path.isEmpty()) "영상이 없습니다. 새로고침(⟳)해 보세요." else "이 폴더에 영상이 없습니다.",
-                                    color = Color.Gray,
-                                )
+                                Text(emptyMessage, color = Color.Gray)
                             }
                         }
-                    } else {
-                        items(here, key = { it.uri }) { v ->
-                            val isSelected = selectedUris.contains(v.uri)
-                            VideoRow(
-                                v = v,
-                                threshold = threshold,
-                                isSelected = isSelected,
-                                inSelectionMode = inSelectionMode,
-                                thumbWidth = thumbSize,
-                                onClick = {
-                                    if (inSelectionMode) toggleSelect(v.uri)
-                                    else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
-                                },
-                                onLongClick = { toggleSelect(v.uri) },
-                                onActionWatched = {
-                                    val watched = v.isWatched(threshold)
-                                    val uris = listOf(v.uri)
-                                    scope.launch(Dispatchers.IO) {
-                                        if (watched) db.videos().markUnwatched(uris) else db.videos().markWatched(uris)
-                                    }
-                                },
-                                onActionReset = {
-                                    scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
-                                },
-                                onActionDelete = {
-                                    deleteState.requestDelete(listOf(v))
-                                },
-                            )
-                            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-                        }
+                    }
+                    items(here, key = { it.uri }) { v ->
+                        val isSelected = selectedUris.contains(v.uri)
+                        VideoRow(
+                            v = v,
+                            threshold = threshold,
+                            isSelected = isSelected,
+                            inSelectionMode = inSelectionMode,
+                            thumbWidth = thumbSize,
+                            onClick = {
+                                if (inSelectionMode) toggleSelect(v.uri)
+                                else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
+                            },
+                            onLongClick = { toggleSelect(v.uri) },
+                            onActionWatched = {
+                                val watched = v.isWatched(threshold)
+                                val uris = listOf(v.uri)
+                                scope.launch(Dispatchers.IO) {
+                                    if (watched) db.videos().markUnwatched(uris) else db.videos().markWatched(uris)
+                                }
+                            },
+                            onActionReset = {
+                                scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
+                            },
+                            onActionDelete = {
+                                deleteState.requestDelete(listOf(v))
+                            },
+                        )
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                     }
                 }
             }
