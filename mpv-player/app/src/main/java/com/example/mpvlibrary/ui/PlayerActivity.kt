@@ -281,6 +281,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var subPlayables = mutableListOf<MpvPath.Playable>()
     private val retiredPlayables = mutableListOf<MpvPath.Playable>()
     private val externalSubtitleUris = arrayListOf<String>()
+    // Persisted only so a process-death restore can re-open them; released when the player finishes.
+    private val subtitleGrants = arrayListOf<String>()
     private var noisyReceiver: android.content.BroadcastReceiver? = null
 
     // Bluetooth / Car AV MediaSession & AudioFocus
@@ -384,6 +386,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             showSpeedDialog = it.getBoolean("session.speedDialog")
             showAudioDialog = it.getBoolean("session.audioDialog")
             showSubDialog = it.getBoolean("session.subDialog")
+            it.getStringArrayList("session.subtitleGrants")?.let(subtitleGrants::addAll)
         }
         lifecycleScope.launch {
             try {
@@ -425,6 +428,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     if (uri != null) {
                         try {
                             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            if (uri.toString() !in subtitleGrants) subtitleGrants += uri.toString()
                         } catch (_: Exception) {}
                         val generation = loadGeneration
                         lifecycleScope.launch {
@@ -2789,6 +2793,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         outState.putBoolean("session.speedDialog", showSpeedDialog)
         outState.putBoolean("session.audioDialog", showAudioDialog)
         outState.putBoolean("session.subDialog", showSubDialog)
+        outState.putStringArrayList("session.subtitleGrants", subtitleGrants)
         if (initialized && !loadPending && activeEntryId != null) {
             runCatching {
                 if (engineEntryId() == activeEntryId) {
@@ -2841,6 +2846,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             if (token != null) LibraryWork.scope.launch {
                 runCatching { PlayerPlaylistStore(application.filesDir.resolve("player-playlists")).remove(token) }
                     .onFailure { AppLog.w(TAG, "playlist cleanup failed: ${it.message}") }
+            }
+            for (uri in subtitleGrants) runCatching {
+                contentResolver.releasePersistableUriPermission(Uri.parse(uri), Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         }
         setupJob?.cancel()
