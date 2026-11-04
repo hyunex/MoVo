@@ -66,6 +66,13 @@ class PlayerPlaylistStore(private val directory: File) {
         check(!file.exists() || file.delete()) { "Cannot remove playlist snapshot" }
     }
 
+    /** Process death skips onDestroy, which is the only other place a snapshot is removed. */
+    fun pruneOlderThan(now: Long, maxAgeMs: Long) {
+        directory.listFiles()?.forEach { file ->
+            if (file.name.startsWith("playlist-") && now - file.lastModified() > maxAgeMs) file.delete()
+        }
+    }
+
     private fun playlistFile(token: String): File {
         require(identityPattern.matches(token)) { "Invalid playlist identity" }
         return File(directory, token)

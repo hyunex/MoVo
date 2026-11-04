@@ -199,6 +199,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         private const val TAG = "mpv"
         private const val EXTRA_PLAYLIST = "playlist"
         private const val MAX_AUTO_SUBTITLES = 8
+        private const val PLAYLIST_SNAPSHOT_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
         const val EXTRA_INDEX = "index"
 
         fun start(context: Context, uris: List<String>, index: Int) {
@@ -207,6 +208,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 val store = PlayerPlaylistStore(application.filesDir.resolve("player-playlists"))
                 var token: String? = null
                 try {
+                    store.pruneOlderThan(System.currentTimeMillis(), PLAYLIST_SNAPSHOT_MAX_AGE_MS)
                     val saved = store.save(uris)
                     token = saved
                     val i = Intent(context, PlayerActivity::class.java)

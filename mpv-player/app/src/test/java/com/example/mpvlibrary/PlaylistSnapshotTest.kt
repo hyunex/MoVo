@@ -69,4 +69,28 @@ class PlaylistSnapshotTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test fun snapshotsOrphanedByProcessDeathArePrunedAfterAWeek() {
+        val directory = Files.createTempDirectory("movo-playlist-test").toFile()
+        try {
+            val store = PlayerPlaylistStore(directory)
+            val now = System.currentTimeMillis()
+            val day = 24L * 60 * 60 * 1000
+            val stale = store.save(listOf("content://provider/old"))
+            directory.resolve(stale).setLastModified(now - 8 * day)
+            val interrupted = directory.resolve("playlist-00000000-0000-0000-0000-000000000000.pending")
+            interrupted.writeText("partial")
+            interrupted.setLastModified(now - 8 * day)
+            val recent = store.save(listOf("content://provider/recent"))
+            directory.resolve(recent).setLastModified(now - 6 * day)
+
+            store.pruneOlderThan(now, 7 * day)
+
+            assertThrows(FileNotFoundException::class.java) { store.load(stale) }
+            assertFalse(interrupted.exists())
+            assertEquals(listOf("content://provider/recent"), store.load(recent))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
 }
