@@ -247,6 +247,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var lastPosition = 0.0
     private var lastDuration = 0.0
     private var pollJob: Job? = null
+    private var setupJob: Job? = null
     private var initialized = false
     private var activeEntryId: Long? = null
     private var loadPending = true
@@ -323,6 +324,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     /** Every native touchpoint funnels here: never throws, always logged. */
     private inline fun mpv(what: String, f: () -> Unit) {
+        if (!initialized) return
         try {
             f()
         } catch (e: Exception) {
@@ -385,7 +387,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 uris = withContext(Dispatchers.IO) {
                     PlayerPlaylistStore(filesDir.resolve("player-playlists")).load(checkNotNull(playlistToken))
                 }
-                finishCreate()
+                if (!destroyed) finishCreate()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -435,7 +437,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         factory = { ctx ->
                             MPVPlayerView(ctx, null).also { v ->
                                 playerView = v
-                                lifecycleScope.launch { setupPlayer(v) }
+                                setupJob = lifecycleScope.launch { setupPlayer(v) }
                             }
                         },
                     )
@@ -628,7 +630,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private suspend fun setupPlayer(view: MPVPlayerView) {
-        if (initialized) return
+        if (initialized || destroyed) return
         initialized = true
         try {
             val configDir = filesDir.resolve("mpv-config").apply { mkdirs() }.absolutePath
@@ -707,6 +709,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             playCurrent(view)
             startPolling()
             resetControlsTimer()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             fail("플레이어 초기화 실패: ${e.message}")
         }
@@ -827,6 +831,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun refreshTracks() {
+        if (!initialized) return
         runCatching {
             subTracks = loadTracks("sub")
             audioTracks = loadTracks("audio")
@@ -865,6 +870,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun setUserPlayback(play: Boolean) {
+        if (destroyed) return
         if (play) {
             playbackIntent.play()
             if (!playbackIntent.hasFocus) requestAudioFocus()
@@ -934,6 +940,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun engineEntryId(): Long? {
+        if (!initialized) return null
         val playing = MPVLib.getPropertyString("playlist-playing-pos")?.toLongOrNull()
             ?.takeIf { it >= 0 } ?: return null
         return MPVLib.getPropertyString("playlist/$playing/id")?.toLongOrNull()
@@ -2795,10 +2802,20 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         gestureEpoch++
         restoreHeldSpeed()
         applyPlaybackGate()
+        // libmpv is a process singleton: the next player's onCreate can run before this onDestroy.
+        if (isFinishing) releasePlayer()
         super.onPause()
     }
 
     override fun onDestroy() {
+        releasePlayer()
+        super.onDestroy()
+        AppLog.i(TAG, "PlayerActivity destroyed")
+    }
+
+    /** Idempotent; afterwards no callback of this instance may reach the engine. */
+    private fun releasePlayer() {
+        if (destroyed) return
         captureCurrentProgress()
         destroyed = true
         loadGeneration++
@@ -2811,7 +2828,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     .onFailure { AppLog.w(TAG, "playlist cleanup failed: ${it.message}") }
             }
         }
-        super.onDestroy()
+        setupJob?.cancel()
         pollJob?.cancel()
         controlsTimerJob?.cancel()
         hudJob?.cancel()
@@ -2833,7 +2850,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             }.onFailure { AppLog.e(TAG, "teardown: $it") }
             initialized = false
         }
-        AppLog.i(TAG, "PlayerActivity destroyed")
     }
 
     private fun fmt(sec: Double): String {
