@@ -2723,6 +2723,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 } else {
                                     mpvOptions = result.normalizedText
                                     showMpvDialog = false
+                                    if (result.appOwnedKeys.isNotEmpty()) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "${result.appOwnedKeys.joinToString(", ")} 줄은 저장했지만 재생에는 적용되지 않습니다. 재생 속도와 영상 정렬은 앱 설정에서 바꿔 주세요.",
+                                            android.widget.Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
                                 }
                             }
                         }

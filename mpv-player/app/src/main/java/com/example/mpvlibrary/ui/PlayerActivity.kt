@@ -650,7 +650,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 fail("일부 고급 MPV 옵션을 적용하지 않았습니다. 설정에서 차단된 줄을 삭제해 주세요.\n${parsed.rejectionMessage()}")
             }
             for ((k, v) in parsed.options) {
-                if (k == "speed" || k == "video-align-y") continue
+                if (k in SettingsRepo.APP_OWNED_OPTIONS) continue
                 mpv("mpv 옵션 $k") {
                     val r = MPVLib.setOptionString(k, v)
                     if (r < 0) AppLog.w(TAG, "mpv option rejected: $k")
