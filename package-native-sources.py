@@ -15,12 +15,14 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent
 LOCK_PATH = ROOT / 'mpv-player/native/sources.lock.json'
+NOTICES_PATH = ROOT / 'THIRD-PARTY-NOTICES.md'
 EXCLUDED_DIRS = {'.git', '.gradle', 'build', 'jniLibs', '__pycache__', '.idea', '.cxx', 'node_modules'}
 EXCLUDED_SUFFIXES = {'.so', '.apk', '.aab', '.jks', '.keystore', '.p12', '.pfx', '.pem', '.key', '.log', '.pyc', '.class'}
 
@@ -47,6 +49,19 @@ def lock_data() -> dict:
 def check_archive(path: Path, pin: dict) -> None:
     if not path.is_file() or path.stat().st_size != pin['bytes'] or digest(path) != pin['sha256']:
         raise ValueError(f"archive size/SHA256 mismatch: {path} ({pin['name']})")
+
+
+def check_notices(lock: dict) -> None:
+    rows = set()
+    for line in NOTICES_PATH.read_text().splitlines():
+        if line.startswith('| `'):
+            cells = [cell.strip().strip('`') for cell in line.strip().strip('|').split('|')]
+            rows.add((cells[0], cells[1]))
+    required = [(pin['name'], pin['revision']) for pin in lock['sources']]
+    required.append(('libc++', 'NDK ' + lock['toolchain']['ndk']))
+    missing = [f'{name} {revision}' for name, revision in required if (name, revision) not in rows]
+    if missing:
+        raise ValueError(f'{NOTICES_PATH.name} lacks a license row for: ' + ', '.join(missing))
 
 
 def archives(lock: dict, caches: list[Path], download: bool) -> dict[str, Path]:
@@ -179,23 +194,24 @@ def source_files() -> list[Path]:
                 'mpv-player/gradle.properties', 'mpv-player/gradlew', 'mpv-player/gradlew.bat',
                 'README.md', 'VERSION', 'LICENSE', 'THIRD-PARTY-NOTICES.md',
                 'package-native-sources.py', 'package-release.py']
-    files = set()
     for name in selected:
-        root = ROOT / name
-        if not root.exists():
-            raise FileNotFoundError(f'required source input: {root}')
-        candidates = root.rglob('*') if root.is_dir() else [root]
-        for path in candidates:
-            rel = path.relative_to(ROOT)
-            lower = path.name.lower()
-            if any(part in EXCLUDED_DIRS for part in rel.parts) or path.suffix.lower() in EXCLUDED_SUFFIXES:
-                continue
-            if 'signing' in lower or 'password' in lower or lower in {'local.properties', '.env', 'key.properties', 'keystore.properties'}:
-                continue
-            if path.is_symlink():
-                raise ValueError(f'source symlink is not allowed: {rel}')
-            if path.is_file():
-                files.add(path)
+        if not (ROOT / name).exists():
+            raise FileNotFoundError(f'required source input: {ROOT / name}')
+    tracked = subprocess.run(['git', '-C', str(ROOT), 'ls-files', '-z', '--', *selected],
+                             check=True, capture_output=True).stdout.decode().split('\0')
+    files = set()
+    for name in filter(None, tracked):
+        rel = Path(name)
+        path = ROOT / rel
+        lower = path.name.lower()
+        if any(part in EXCLUDED_DIRS for part in rel.parts) or path.suffix.lower() in EXCLUDED_SUFFIXES:
+            continue
+        if 'signing' in lower or 'password' in lower or lower in {'local.properties', '.env', 'key.properties', 'keystore.properties'}:
+            continue
+        if path.is_symlink():
+            raise ValueError(f'source symlink is not allowed: {rel}')
+        if path.is_file():
+            files.add(path)
     return sorted(files)
 
 
@@ -213,6 +229,7 @@ def bundle(lock: dict, paths: dict[str, Path], binary_manifest: Path, destinatio
     checksum_path = destination.with_name(destination.name + '.sha256')
     if checksum_path.exists() or checksum_path.is_symlink():
         raise FileExistsError(checksum_path)
+    check_notices(lock)
     manifest = json.loads(binary_manifest.read_text())
     current = record_binaries(lock, ROOT / 'mpv-player/app/src/main/jniLibs')
     if manifest != current:

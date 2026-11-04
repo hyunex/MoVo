@@ -239,13 +239,13 @@ class SettingsRepo(private val context: Context) {
             fun matches(vararg prefixes: String) =
                 prefixes.any { base.startsWith(it) }
             return when {
-                base == "ao" || base == "vo" -> OptionRejectionReason.OUTPUT_MANAGEMENT
+                base == "ao" || base == "vo" || base == "audio-device" -> OptionRejectionReason.OUTPUT_MANAGEMENT
                 base in WRITE_OPTIONS ||
                     matches("screenshot", "watch-later", "write-filename-in-watch-later",
                         "record", "stream-record", "stream-dump", "stream-capture", "dump",
                         "cache-dir", "cache-on-disk", "demuxer-cache",
                         "gpu-shader-cache-dir", "icc-cache-dir", "vo-image-outdir",
-                        "save-watch-history", "watch-history-path", "odash", "ogs") -> OptionRejectionReason.FILE_WRITING
+                        "save-watch-history", "watch-history-path", "odash", "ogs", "ao-pcm") -> OptionRejectionReason.FILE_WRITING
                 matches("script", "load-script", "lua", "js", "javascript", "ytdl") ->
                     OptionRejectionReason.SCRIPTS
                 matches("config", "include") -> OptionRejectionReason.CONFIG

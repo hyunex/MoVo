@@ -126,6 +126,38 @@ class StateLogicTest {
         assertFalse(parsed.rejectionMessage().contains("secret"))
     }
 
+    @Test fun mpvPcmAudioOutputCannotOverwriteAppPrivateFiles() {
+        val parsed = SettingsRepo.parseMpvOptions(
+            "audio-device=pcm\n" +
+                "ao-pcm-file=/data/user/0/com.example.mpvlibrary/databases/library.db\n" +
+                "--AO_PCM_APPEND=yes\nhwdec=auto",
+        )
+        assertEquals(listOf("hwdec" to "auto"), parsed.options)
+        assertEquals(
+            listOf(SettingsRepo.OptionRejectionReason.OUTPUT_MANAGEMENT,
+                SettingsRepo.OptionRejectionReason.FILE_WRITING,
+                SettingsRepo.OptionRejectionReason.FILE_WRITING),
+            parsed.rejected.map { it.reason },
+        )
+        assertFalse(parsed.rejectionMessage().contains("library.db"))
+    }
+
+    @Test fun everyPathTakingMpvOptionAtThePinnedCommitIsRejected() {
+        // Options flagged M_OPT_FILE in mpv f4d13e1c, with substruct prefixes resolved.
+        val keys = listOf("ao-pcm-file", "o", "demuxer-cache-dir", "input-conf", "sub-ass-styles",
+            "playlist", "include", "dump-stats", "log-file", "config-dir", "scripts", "sub-files",
+            "audio-files", "cover-art-files", "sub-file-paths", "audio-file-paths", "external-files",
+            "stream-dump", "watch-later-dir", "watch-history-path", "ordered-chapters-files",
+            "chapters-file", "input-ipc-server", "screenshot-dir", "cookies-file", "tls-ca-file",
+            "tls-cert-file", "tls-key-file", "bluray-device", "cdda-device", "dvbin-file", "dvd-device",
+            "drm-device", "icc-profile", "icc-cache-dir", "glsl-shaders", "gpu-shader-cache-dir", "lut",
+            "image-lut", "target-lut", "vo-image-outdir", "sub-fonts-dir", "osd-fonts-dir",
+            "osd-bar-fonts-dir")
+        val parsed = SettingsRepo.parseMpvOptions(keys.joinToString("\n") { "$it=/data/private" })
+        assertEquals(emptyList<Pair<String, String>>(), parsed.options)
+        assertEquals(keys.size, parsed.rejected.size)
+    }
+
     @Test fun mpvExistingSecurityRestrictionsKeepCategoricalReasons() {
         val parsed = SettingsRepo.parseMpvOptions(
             "--config-dir=secret\n---load-script=secret\nhttp-header-fields=secret\n" +
