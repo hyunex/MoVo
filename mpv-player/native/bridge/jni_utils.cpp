@@ -3,6 +3,9 @@
 
 #include <jni.h>
 #include <stdlib.h>
+#include <string.h>
+
+#include "utf16.h"
 
 bool acquire_jni_env(JavaVM *vm, JNIEnv **env)
 {
@@ -11,6 +14,15 @@ bool acquire_jni_env(JavaVM *vm, JNIEnv **env)
         return vm->AttachCurrentThread(env, NULL) == 0;
     else
         return ret == JNI_OK;
+}
+
+// NewStringUTF requires modified UTF-8; mpv passes media-supplied bytes through unchecked.
+jstring new_java_string(JNIEnv *env, const char *utf8)
+{
+    if (!utf8)
+        return NULL;
+    const std::u16string utf16 = utf8_to_utf16(utf8, strlen(utf8));
+    return env->NewString(reinterpret_cast<const jchar *>(utf16.data()), static_cast<jsize>(utf16.size()));
 }
 
 // Apparently it's considered slow to FindClass and GetMethodID every time we need them,

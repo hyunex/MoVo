@@ -7,6 +7,7 @@
 
 bool acquire_jni_env(JavaVM *vm, JNIEnv **env);
 void init_methods_cache(JNIEnv *env);
+jstring new_java_string(JNIEnv *env, const char *utf8);
 
 #ifndef UTIL_EXTERN
 #define UTIL_EXTERN extern

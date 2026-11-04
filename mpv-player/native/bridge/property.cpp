@@ -89,7 +89,7 @@ jni_func(jstring, getPropertyString, jstring jproperty) {
     char *value;
     if (common_get_property(env, jproperty, MPV_FORMAT_STRING, &value) < 0)
         return NULL;
-    jstring jvalue = env->NewStringUTF(value);
+    jstring jvalue = new_java_string(env, value);
     mpv_free(value);
     return jvalue;
 }
