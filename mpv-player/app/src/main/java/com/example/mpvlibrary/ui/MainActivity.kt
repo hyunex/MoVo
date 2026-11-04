@@ -349,7 +349,7 @@ fun LibraryScreen(
     val scope = rememberCoroutineScope()
 
     var folders by remember { mutableStateOf<List<FolderEntity>>(emptyList()) }
-    var recent by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
+    var continueWatching by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
     val scanStatuses by LibraryScanner.statuses.collectAsState()
     var threshold by remember { mutableStateOf(0.9) }
     var thumbScale by remember { mutableStateOf("medium") }
@@ -374,7 +374,7 @@ fun LibraryScreen(
         threshold = s.watchedThreshold.first()
         thumbScale = s.thumbScale.first()
         launch(Dispatchers.IO) { db.folders().observeAll().collect { folders = it } }
-        launch(Dispatchers.IO) { db.videos().observeRecent(10).collect { recent = it } }
+        launch(Dispatchers.IO) { db.videos().observeContinueWatching(threshold, 6).collect { continueWatching = it } }
         launch(Dispatchers.IO) { s.thumbScale.collect { thumbScale = it } }
         launch(Dispatchers.IO) { s.continuePlaylistMode.collect { continuePlaylistMode = it } }
     }
@@ -402,11 +402,6 @@ fun LibraryScreen(
                 scanner.scan(folder, retryMetadata = true)
             }
         }
-    }
-
-    // 중단 지점이 있는 미시청 영상: 탭하면 PlayerActivity가 start 옵션으로 이어 재생
-    val continueWatching = remember(recent, threshold) {
-        recent.filter { it.positionSec > 0 && !it.isWatched(threshold) }.take(6)
     }
 
     val playContinueVideo: (VideoEntity) -> Unit = { v ->

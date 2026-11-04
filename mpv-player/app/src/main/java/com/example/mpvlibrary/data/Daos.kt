@@ -43,8 +43,9 @@ interface VideoDao {
     @Query("SELECT * FROM videos WHERE uri = :uri")
     suspend fun byUri(uri: String): VideoEntity?
 
-    @Query("SELECT * FROM videos WHERE lastPlayedAt > 0 ORDER BY lastPlayedAt DESC LIMIT :limit")
-    fun observeRecent(limit: Int): Flow<List<VideoEntity>>
+    /** Mirrors [VideoEntity.isInProgress]; filtering after LIMIT let finished rows evict unfinished ones. */
+    @Query("SELECT * FROM videos WHERE lastPlayedAt > 0 AND positionSec > 0 AND watchedOverride != 1 AND (watchedOverride != 0 OR (CASE WHEN durationSec > 0 THEN MIN(MAX(positionSec / durationSec, 0.0), 1.0) ELSE 0.0 END) < :threshold) ORDER BY lastPlayedAt DESC LIMIT :limit")
+    fun observeContinueWatching(threshold: Double, limit: Int): Flow<List<VideoEntity>>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertNew(videos: List<VideoEntity>)
