@@ -198,6 +198,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     companion object {
         private const val TAG = "mpv"
         private const val EXTRA_PLAYLIST = "playlist"
+        private const val MAX_AUTO_SUBTITLES = 8
         const val EXTRA_INDEX = "index"
 
         fun start(context: Context, uris: List<String>, index: Int) {
@@ -1319,22 +1320,24 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         dir = dir.findFile(seg) ?: return@launch
                     }
                 }
-                val matches = MpvPath.matchSubtitles(entity.name, dir.listFiles().mapNotNull { it.name })
+                val listing = dir.listFiles().mapNotNull { doc -> doc.name?.let { it to doc } }.toMap()
+                val matches = MpvPath.matchSubtitles(entity.name, listing.keys.toList()).take(MAX_AUTO_SUBTITLES)
                 if (matches.isEmpty()) return@launch
                 AppLog.i(TAG, "auto-sub found ${matches.size}: ${matches.joinToString()}")
+                // Real file paths: mpv subtitle demuxers often reject fd://.
+                val cached = matches.mapNotNull { name ->
+                    MpvPath.cacheCopy(this@PlayerActivity, listing.getValue(name).uri, name)?.let { name to it }
+                }
+                if (cached.isEmpty()) return@launch
                 withContext(Dispatchers.Main) {
                     if (destroyed || generation != loadGeneration || loadPending) return@withContext
-                    matches.forEachIndexed { i, name ->
-                        val doc = dir.findFile(name) ?: return@forEachIndexed
-                        // Real file path: mpv subtitle demuxers often reject fd://.
-                        val cached = MpvPath.cacheCopy(this@PlayerActivity, doc.uri, name)
-                            ?: return@forEachIndexed
+                    cached.forEachIndexed { i, (name, file) ->
                         mpv("자막 자동추가 $name") {
-                            MPVLib.command(arrayOf("sub-add", cached.absolutePath, if (i == 0) "select" else "auto"))
+                            MPVLib.command(arrayOf("sub-add", file.absolutePath, if (i == 0) "select" else "auto"))
                         }
                     }
                     refreshTracks()
-                    showHud(HudMode.ASPECT, "외부 자막 ${matches.size}개 자동 로드")
+                    showHud(HudMode.ASPECT, "외부 자막 ${cached.size}개 자동 로드")
                 }
             } catch (e: CancellationException) {
                 throw e
