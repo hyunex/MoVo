@@ -12,7 +12,6 @@ import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
-import android.view.WindowManager
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -61,6 +60,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.example.mpvlibrary.data.AppDb
@@ -249,7 +249,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var pollJob: Job? = null
     private var setupJob: Job? = null
     private var initialized = false
-    private var activeEntryId: Long? = null
+    private var activeEntryId by mutableStateOf<Long?>(null)
     private var loadPending = true
     private var loadSubmitted = false
     private var rejectedEntryId: Long? = null
@@ -362,7 +362,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
             )
         }.onFailure { AppLog.w(TAG, "noisy receiver register failed: $it") }
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
@@ -413,6 +412,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             MaterialTheme(colorScheme = darkColorScheme()) {
                 var showTitleDialog by rememberSaveable { mutableStateOf(false) }
                 LaunchedEffect(controlsVisible, isLocked) { updateSystemBars() }
+                val view = LocalView.current
+                val playing = !isPaused && activeEntryId != null
+                SideEffect { view.keepScreenOn = playing }
                 // External subtitle file picker launcher
                 val subPicker = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument(),
