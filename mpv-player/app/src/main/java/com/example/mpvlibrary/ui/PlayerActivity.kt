@@ -1104,7 +1104,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     private fun selectAspectRatio(next: AspectRatioMode) {
         currentAspectMode = next
-        mpv("aspect ratio") { applyAspectRatio(next) }
+        mpv("aspect ratio") {
+            MPVLib.setPropertyDouble("video-zoom", 0.0)
+            applyAspectRatio(next)
+        }
         showHud(HudMode.ASPECT, next.title)
     }
 
@@ -1370,6 +1373,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         var isVolume = false
                         var isFastPlay = false
                         var initialPinchDist = 0f
+                        var baseZoom = 0.0
 
                         try {
                         while (true) {
@@ -1399,12 +1403,13 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                     val p1 = pressed[0].position
                                     val p2 = pressed[1].position
                                     initialPinchDist = (p1 - p2).getDistance().coerceAtLeast(10f)
+                                    baseZoom = MPVLib.getPropertyDouble("video-zoom") ?: 0.0
                                 } else {
                                     val p1 = pressed[0].position
                                     val p2 = pressed[1].position
                                     val dist = (p1 - p2).getDistance()
-                                    val scale = (dist / initialPinchDist).coerceIn(0.5f, 3.0f)
-                                    val zoomLevel = kotlin.math.log2(scale.toDouble())
+                                    val zoomLevel = pinchZoom(baseZoom, initialPinchDist, dist)
+                                    val scale = Math.pow(2.0, zoomLevel).toFloat()
                                     MPVLib.setPropertyDouble("video-zoom", zoomLevel)
                                     showHud(HudMode.ZOOM, "화면 배율: ${(scale * 100).roundToInt()}%", scale / 3.0f, autoDismiss = false)
                                 }
@@ -2881,3 +2886,7 @@ class TapSequence {
         return TapAction.Pending
     }
 }
+
+/** mpv video-zoom (log2 scale) for a pinch that started at [baseZoom], clamped to 50%..300%. */
+fun pinchZoom(baseZoom: Double, startDist: Float, dist: Float): Double =
+    (baseZoom + kotlin.math.log2((dist / startDist).toDouble())).coerceIn(-1.0, kotlin.math.log2(3.0))

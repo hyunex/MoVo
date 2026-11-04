@@ -3,6 +3,7 @@ package com.example.mpvlibrary
 import com.example.mpvlibrary.ui.DOUBLE_TAP_TIMEOUT_MS
 import com.example.mpvlibrary.ui.TapAction
 import com.example.mpvlibrary.ui.TapSequence
+import com.example.mpvlibrary.ui.pinchZoom
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -40,4 +41,13 @@ class GestureMathTest {
         assertEquals(TapAction.Pending, center.onTap(300 - 1, 500f, 0f, w, 10.0))
     }
 
+    @Test
+    fun secondPinchContinuesFromCurrentZoom() {
+        val first = pinchZoom(baseZoom = 0.0, startDist = 100f, dist = 200f)
+        assertEquals(1.0, first, 1e-9)
+        assertEquals(1.0, pinchZoom(baseZoom = first, startDist = 300f, dist = 300f), 1e-9)
+        assertEquals(1.5, pinchZoom(baseZoom = first, startDist = 100f, dist = 141.42136f), 1e-6)
+        assertEquals(kotlin.math.log2(3.0), pinchZoom(baseZoom = first, startDist = 100f, dist = 1000f), 1e-9)
+        assertEquals(-1.0, pinchZoom(baseZoom = first, startDist = 1000f, dist = 10f), 1e-9)
+    }
 }
