@@ -349,7 +349,7 @@ fun LibraryScreen(
     val scope = rememberCoroutineScope()
 
     var folders by remember { mutableStateOf<List<FolderEntity>>(emptyList()) }
-    var recent by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
+    var continueWatching by remember { mutableStateOf<List<VideoEntity>>(emptyList()) }
     val scanStatuses by LibraryScanner.statuses.collectAsState()
     var threshold by remember { mutableStateOf(0.9) }
     var thumbScale by remember { mutableStateOf("medium") }
@@ -374,7 +374,7 @@ fun LibraryScreen(
         threshold = s.watchedThreshold.first()
         thumbScale = s.thumbScale.first()
         launch(Dispatchers.IO) { db.folders().observeAll().collect { folders = it } }
-        launch(Dispatchers.IO) { db.videos().observeRecent(10).collect { recent = it } }
+        launch(Dispatchers.IO) { db.videos().observeContinueWatching(threshold, 6).collect { continueWatching = it } }
         launch(Dispatchers.IO) { s.thumbScale.collect { thumbScale = it } }
         launch(Dispatchers.IO) { s.continuePlaylistMode.collect { continuePlaylistMode = it } }
     }
@@ -402,11 +402,6 @@ fun LibraryScreen(
                 scanner.scan(folder, retryMetadata = true)
             }
         }
-    }
-
-    // 중단 지점이 있는 미시청 영상: 탭하면 PlayerActivity가 start 옵션으로 이어 재생
-    val continueWatching = remember(recent, threshold) {
-        recent.filter { it.positionSec > 0 && !it.isWatched(threshold) }.take(6)
     }
 
     val playContinueVideo: (VideoEntity) -> Unit = { v ->
@@ -550,6 +545,7 @@ fun LibraryScreen(
                                     threshold = threshold,
                                     onPlay = playContinueVideo,
                                     onRefresh = { scanner.scanAll(retryMetadata = true) },
+                                    onAddFolder = { picker.launch(null) },
                                     deleteState = deleteState,
                                     modifier = Modifier.padding(pad),
                                     thumbSize = when (thumbScale) {
@@ -622,6 +618,12 @@ fun LibraryScreen(
                             IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll(retryMetadata = true) } }) {
                                 Icon(Icons.Default.Refresh, "스캔")
                             }
+                            val selectedFolder = (sel as? HomeSelection.Folder)?.let { s -> folders.find { it.id == s.folderId } }
+                            if (selectedFolder != null) {
+                                IconButton(onClick = { requestFolderUnregister(selectedFolder) }) {
+                                    Icon(Icons.Default.DeleteOutline, "폴더 등록 해제")
+                                }
+                            }
                             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -667,6 +669,7 @@ fun LibraryScreen(
                                                 folderPath = ""
                                                 selection = HomeSelection.Folder(f.id, "")
                                             },
+                                            onLongClickLabel = "폴더 등록 해제",
                                             onLongClick = { requestFolderUnregister(f) },
                                         ),
                                     ) {
@@ -686,6 +689,7 @@ fun LibraryScreen(
                                 threshold = threshold,
                                 onPlay = playContinueVideo,
                                 onRefresh = { scanner.scanAll(retryMetadata = true) },
+                                onAddFolder = { picker.launch(null) },
                                 deleteState = deleteState,
                                 thumbSize = when (thumbScale) {
                                     "small" -> 88.dp
@@ -864,70 +868,49 @@ class SafeDeleteState(
             val failedUris = mutableListOf<String>()
             val securityDeniedUris = mutableSetOf<String>()
 
-            for (entity in entities) {
-                val u = entity.uri
-                val parsed = Uri.parse(u)
-                val f = foldersById[entity.folderId]
-                if (f != null) {
-                    runCatching { LibraryScanner.takePermission(context, Uri.parse(f.treeUri)) }
-                }
-                var success = false
-                if (!success) {
-                    val contractRes = runCatching {
-                        DocumentsContract.deleteDocument(context.contentResolver, parsed)
+            val successfullyDeleted = scanner.exclusive {
+                for (entity in entities) {
+                    val u = entity.uri
+                    val parsed = Uri.parse(u)
+                    val f = foldersById[entity.folderId]
+                    if (f != null) {
+                        runCatching { LibraryScanner.takePermission(context, Uri.parse(f.treeUri)) }
                     }
-                    if (contractRes.isSuccess && contractRes.getOrNull() == true) {
-                        success = true
-                    } else if (contractRes.exceptionOrNull() is SecurityException) {
-                        securityDeniedUris.add(u)
+                    var success = false
+                    if (!success) {
+                        val contractRes = runCatching {
+                            DocumentsContract.deleteDocument(context.contentResolver, parsed)
+                        }
+                        if (contractRes.isSuccess && contractRes.getOrNull() == true) {
+                            success = true
+                        } else if (contractRes.exceptionOrNull() is SecurityException) {
+                            securityDeniedUris.add(u)
+                        }
                     }
-                }
-                if (!success) {
-                    val docRes = runCatching {
-                        DocumentFile.fromSingleUri(context, parsed)?.delete() == true
+                    if (!success) {
+                        val docRes = runCatching {
+                            DocumentFile.fromSingleUri(context, parsed)?.delete() == true
+                        }
+                        if (docRes.isSuccess && docRes.getOrNull() == true) {
+                            success = true
+                        } else if (docRes.exceptionOrNull() is SecurityException) {
+                            securityDeniedUris.add(u)
+                        }
                     }
-                    if (docRes.isSuccess && docRes.getOrNull() == true) {
-                        success = true
-                    } else if (docRes.exceptionOrNull() is SecurityException) {
-                        securityDeniedUris.add(u)
-                    }
-                }
-                if (!success) {
-                    val treeRes = runCatching {
-                        if (f != null) {
-                            val root = DocumentFile.fromTreeUri(context, Uri.parse(f.treeUri))
-                            if (root != null) {
-                                var dir: DocumentFile? = root
-                                if (entity.dirPath.isNotEmpty()) {
-                                    for (seg in entity.dirPath.split('/')) {
-                                        if (seg.isEmpty() || seg == "." || seg == "..") continue
-                                        dir = dir?.findFile(seg)
-                                        if (dir == null) break
-                                    }
-                                }
-                                dir?.findFile(entity.name)?.delete() == true
-                            } else false
-                        } else false
-                    }
-                    if (treeRes.isSuccess && treeRes.getOrNull() == true) {
-                        success = true
-                    } else if (treeRes.exceptionOrNull() is SecurityException) {
-                        securityDeniedUris.add(u)
+                    if (success) {
+                        deletedCount++
+                        AppLog.i("library", "file deleted via SAF: $u")
+                    } else {
+                        failedCount++
+                        failedUris.add(u)
+                        AppLog.w("library", "file SAF delete failed: $u")
                     }
                 }
-                if (success) {
-                    deletedCount++
-                    AppLog.i("library", "file deleted via SAF: $u")
-                } else {
-                    failedCount++
-                    failedUris.add(u)
-                    AppLog.w("library", "file SAF delete failed: $u")
+                (targets - failedUris.toSet()).also {
+                    if (it.isNotEmpty()) db.videos().deleteByUris(it)
                 }
             }
-
-            val successfullyDeleted = targets - failedUris.toSet()
             if (successfullyDeleted.isNotEmpty()) {
-                db.videos().deleteByUris(successfullyDeleted)
                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                     onDeleteSuccess?.invoke(successfullyDeleted)
                 }
@@ -1120,6 +1103,7 @@ fun ContinueWatchingPane(
     threshold: Double,
     onPlay: (VideoEntity) -> Unit,
     onRefresh: suspend () -> Unit,
+    onAddFolder: () -> Unit,
     deleteState: SafeDeleteState,
     modifier: Modifier = Modifier,
     thumbSize: Dp = 116.dp,
@@ -1128,9 +1112,10 @@ fun ContinueWatchingPane(
     val db = remember { AppDb.get(context) }
     val scope = rememberCoroutineScope()
     val scanStatuses by LibraryScanner.statuses.collectAsState()
-    val registeredFolders by remember(db) { db.folders().observeAll() }.collectAsState(initial = emptyList())
+    // null until Room answers, so a returning user never sees the first-run prompt flash.
+    val registeredFolders by remember(db) { db.folders().observeAll() }.collectAsState(initial = null)
     val failedFolders = remember(registeredFolders, scanStatuses) {
-        registeredFolders.filter { scanStatuses[it.id]?.error != null }
+        registeredFolders.orEmpty().filter { scanStatuses[it.id]?.error != null }
     }
 
     PullRefreshWrapper(
@@ -1158,7 +1143,19 @@ fun ContinueWatchingPane(
                     .verticalScroll(rememberScrollState()),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("이어볼 영상이 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
+                if (registeredFolders?.isEmpty() == true) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("등록된 영상 폴더가 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = onAddFolder) {
+                            Icon(Icons.Default.CreateNewFolder, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("영상 폴더 등록")
+                        }
+                    }
+                } else {
+                    Text("이어볼 영상이 없습니다", color = Color.Gray, style = MaterialTheme.typography.bodyLarge)
+                }
             }
         } else {
             LazyColumn(Modifier.fillMaxSize()) {
@@ -1174,7 +1171,8 @@ fun ContinueWatchingPane(
                         onLongClick = { onPlay(v) },
                         onActionWatched = {
                             scope.launch(Dispatchers.IO) {
-                                db.videos().setOverride(v.uri, if (watched) -1 else 1)
+                                val uris = listOf(v.uri)
+                                if (watched) db.videos().markUnwatched(uris) else db.videos().markWatched(uris)
                             }
                         },
                         onActionReset = {
@@ -1278,7 +1276,9 @@ fun FolderScreen(
     val videosByDir = remember(videos) { videos.groupBy { it.dirPath } }
     val naturalNameKeys = remember(videos) { videos.associate { it.uri to naturalKey(it.name) } }
     val episodeTags = remember(videos) { videos.associate { it.uri to episodeTag(it.name) } }
-    val subDirs = remember(videosByDir, path) {
+    // A query lists matches from every subfolder, so browsing rows would only push results down.
+    val subDirs = remember(videosByDir, path, query) {
+        if (query.isNotBlank()) return@remember emptyList<String>()
         val prefix = if (path.isEmpty()) "" else "$path/"
         videosByDir.keys.asSequence()
             .filter { it.startsWith(prefix) && it != path }
@@ -1288,9 +1288,9 @@ fun FolderScreen(
             .sorted()
             .toList()
     }
-    val here = remember(videosByDir, naturalNameKeys, episodeTags, path, query, watchFilter, sortMode, threshold) {
-        val filtered = videosByDir[path].orEmpty().filter {
-            (query.isBlank() || it.name.contains(query, ignoreCase = true)) && when (watchFilter) {
+    val here = remember(videos, naturalNameKeys, episodeTags, path, query, watchFilter, sortMode, threshold) {
+        val filtered = videosInView(videos, path, query).filter {
+            when (watchFilter) {
                 WatchFilter.UNSEEN -> !it.isWatched(threshold)
                 WatchFilter.IN_PROGRESS -> it.isInProgress(threshold)
                 WatchFilter.WATCHED -> it.isWatched(threshold)
@@ -1319,6 +1319,76 @@ fun FolderScreen(
                 !LibraryScanner.hasPersistedPermission(context, t, write = true)
             }
         } else false
+    }
+
+    val selectionActions: @Composable () -> Unit = {
+        val allSelected = here.isNotEmpty() && selectedUris.size == here.size
+        IconButton(onClick = {
+            selectedUris = if (allSelected) emptySet() else here.map { it.uri }.toSet()
+        }) {
+            Icon(if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll, "모두 선택")
+        }
+        IconButton(onClick = {
+            val list = here.filter { selectedUris.contains(it.uri) }.map { it.uri }
+            if (list.isNotEmpty()) PlayerActivity.start(context, list, 0)
+        }) {
+            Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
+        }
+        IconButton(onClick = {
+            deleteState.requestDelete(videos.filter { it.uri in selectedUris })
+        }) {
+            Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
+        }
+        var showBatchMenu by remember { mutableStateOf(false) }
+        Box {
+            IconButton(onClick = { showBatchMenu = true }) {
+                Icon(Icons.Default.MoreVert, "작업 더보기")
+            }
+            DropdownMenu(
+                expanded = showBatchMenu,
+                onDismissRequest = { showBatchMenu = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("시청 완료로 표시") },
+                    leadingIcon = { Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF2E7D32)) },
+                    onClick = {
+                        val uris = selectedUris.toList()
+                        scope.launch(Dispatchers.IO) { db.videos().markWatched(uris) }
+                        selectedUris = emptySet()
+                        showBatchMenu = false
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("미시청으로 표시") },
+                    leadingIcon = { Icon(Icons.Default.RemoveDone, null) },
+                    onClick = {
+                        val uris = selectedUris.toList()
+                        scope.launch(Dispatchers.IO) { db.videos().markUnwatched(uris) }
+                        selectedUris = emptySet()
+                        showBatchMenu = false
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("재생 기록 초기화") },
+                    leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
+                    onClick = {
+                        val uris = selectedUris.toList()
+                        scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(uris) }
+                        selectedUris = emptySet()
+                        showBatchMenu = false
+                    },
+                )
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("선택 삭제", color = MaterialTheme.colorScheme.error) },
+                    leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    onClick = {
+                        deleteState.requestDelete(videos.filter { it.uri in selectedUris })
+                        showBatchMenu = false
+                    },
+                )
+            }
+        }
     }
 
     val folderContent: @Composable (Modifier) -> Unit = { modifier ->
@@ -1383,23 +1453,7 @@ fun FolderScreen(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.weight(1f),
                         )
-                        val allSelected = here.isNotEmpty() && selectedUris.size == here.size
-                        IconButton(onClick = {
-                            selectedUris = if (allSelected) emptySet() else here.map { it.uri }.toSet()
-                        }) {
-                            Icon(if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll, "모두 선택")
-                        }
-                        IconButton(onClick = {
-                            val list = here.filter { selectedUris.contains(it.uri) }.map { it.uri }
-                            if (list.isNotEmpty()) PlayerActivity.start(context, list, 0)
-                        }) {
-                            Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
-                        }
-                        IconButton(onClick = {
-                            deleteState.requestDelete(videos.filter { it.uri in selectedUris })
-                        }) {
-                            Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
-                        }
+                        selectionActions()
                     }
                 }
             }
@@ -1512,42 +1566,48 @@ fun FolderScreen(
                             HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                         }
                     }
-                    if (subDirs.isEmpty() && here.isEmpty()) {
+                    val emptyMessage = when {
+                        here.isNotEmpty() -> null
+                        query.isNotBlank() || watchFilter != null -> "조건에 맞는 영상이 없습니다"
+                        subDirs.isNotEmpty() -> null
+                        path.isEmpty() -> "영상이 없습니다. 새로고침(⟳)해 보세요."
+                        else -> "이 폴더에 영상이 없습니다."
+                    }
+                    if (emptyMessage != null) {
                         item {
                             Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                                Text(
-                                    if (path.isEmpty()) "영상이 없습니다. 새로고침(⟳)해 보세요." else "이 폴더에 영상이 없습니다.",
-                                    color = Color.Gray,
-                                )
+                                Text(emptyMessage, color = Color.Gray)
                             }
                         }
-                    } else {
-                        items(here, key = { it.uri }) { v ->
-                            val isSelected = selectedUris.contains(v.uri)
-                            VideoRow(
-                                v = v,
-                                threshold = threshold,
-                                isSelected = isSelected,
-                                inSelectionMode = inSelectionMode,
-                                thumbWidth = thumbSize,
-                                onClick = {
-                                    if (inSelectionMode) toggleSelect(v.uri)
-                                    else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
-                                },
-                                onLongClick = { toggleSelect(v.uri) },
-                                onActionWatched = {
-                                    val next = if (v.isWatched(threshold)) -1 else 1
-                                    scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
-                                },
-                                onActionReset = {
-                                    scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
-                                },
-                                onActionDelete = {
-                                    deleteState.requestDelete(listOf(v))
-                                },
-                            )
-                            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-                        }
+                    }
+                    items(here, key = { it.uri }) { v ->
+                        val isSelected = selectedUris.contains(v.uri)
+                        VideoRow(
+                            v = v,
+                            threshold = threshold,
+                            isSelected = isSelected,
+                            inSelectionMode = inSelectionMode,
+                            thumbWidth = thumbSize,
+                            onClick = {
+                                if (inSelectionMode) toggleSelect(v.uri)
+                                else PlayerActivity.start(context, allUris, allUris.indexOf(v.uri))
+                            },
+                            onLongClick = { toggleSelect(v.uri) },
+                            onActionWatched = {
+                                val watched = v.isWatched(threshold)
+                                val uris = listOf(v.uri)
+                                scope.launch(Dispatchers.IO) {
+                                    if (watched) db.videos().markUnwatched(uris) else db.videos().markWatched(uris)
+                                }
+                            },
+                            onActionReset = {
+                                scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
+                            },
+                            onActionDelete = {
+                                deleteState.requestDelete(listOf(v))
+                            },
+                        )
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
                     }
                 }
             }
@@ -1572,75 +1632,7 @@ fun FolderScreen(
                                 maxLines = 1,
                             )
                         },
-                        actions = {
-                            val allSelected = here.isNotEmpty() && selectedUris.size == here.size
-                            IconButton(onClick = {
-                                selectedUris = if (allSelected) emptySet() else here.map { it.uri }.toSet()
-                            }) {
-                                Icon(if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll, "모두 선택")
-                            }
-                            IconButton(onClick = {
-                                val list = here.filter { selectedUris.contains(it.uri) }.map { it.uri }
-                                if (list.isNotEmpty()) PlayerActivity.start(context, list, 0)
-                            }) {
-                                Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
-                            }
-                            IconButton(onClick = {
-                                deleteState.requestDelete(videos.filter { it.uri in selectedUris })
-                            }) {
-                                Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
-                            }
-                            var showBatchMenu by remember { mutableStateOf(false) }
-                            Box {
-                                IconButton(onClick = { showBatchMenu = true }) {
-                                    Icon(Icons.Default.MoreVert, "작업 더보기")
-                                }
-                                DropdownMenu(
-                                    expanded = showBatchMenu,
-                                    onDismissRequest = { showBatchMenu = false },
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("시청 완료로 표시") },
-                                        leadingIcon = { Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF2E7D32)) },
-                                        onClick = {
-                                            val uris = selectedUris.toList()
-                                            scope.launch(Dispatchers.IO) { db.videos().setOverrideBatch(uris, 1) }
-                                            selectedUris = emptySet()
-                                            showBatchMenu = false
-                                        },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("미시청으로 표시") },
-                                        leadingIcon = { Icon(Icons.Default.RemoveDone, null) },
-                                        onClick = {
-                                            val uris = selectedUris.toList()
-                                            scope.launch(Dispatchers.IO) { db.videos().setOverrideBatch(uris, -1) }
-                                            selectedUris = emptySet()
-                                            showBatchMenu = false
-                                        },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("재생 기록 초기화") },
-                                        leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
-                                        onClick = {
-                                            val uris = selectedUris.toList()
-                                            scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(uris) }
-                                            selectedUris = emptySet()
-                                            showBatchMenu = false
-                                        },
-                                    )
-                                    HorizontalDivider()
-                                    DropdownMenuItem(
-                                        text = { Text("선택 삭제", color = MaterialTheme.colorScheme.error) },
-                                        leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                                        onClick = {
-                                            deleteState.requestDelete(videos.filter { it.uri in selectedUris })
-                                            showBatchMenu = false
-                                        },
-                                    )
-                                }
-                            }
-                        },
+                        actions = { selectionActions() },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     )
                 } else {
@@ -2731,6 +2723,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 } else {
                                     mpvOptions = result.normalizedText
                                     showMpvDialog = false
+                                    if (result.appOwnedKeys.isNotEmpty()) {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "${result.appOwnedKeys.joinToString(", ")} 줄은 저장했지만 재생에는 적용되지 않습니다. 재생 속도와 영상 정렬은 앱 설정에서 바꿔 주세요.",
+                                            android.widget.Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
                                 }
                             }
                         }
@@ -2931,6 +2930,16 @@ private fun videoAnnouncement(video: VideoEntity): String = buildList {
         add("최근 시청: " + SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date(video.lastPlayedAt)))
     }
 }.joinToString(", ")
+
+/** Rows a folder view lists: its own directory, or with a query every name match beneath it. */
+fun videosInView(videos: List<VideoEntity>, path: String, query: String): List<VideoEntity> {
+    if (query.isBlank()) return videos.filter { it.dirPath == path }
+    val below = "$path/"
+    return videos.filter {
+        (path.isEmpty() || it.dirPath == path || it.dirPath.startsWith(below)) &&
+            it.name.contains(query, ignoreCase = true)
+    }
+}
 
 /** Zero-pad digit runs so "Ep 2" sorts before "Ep 10". */
 fun naturalKey(name: String): String {

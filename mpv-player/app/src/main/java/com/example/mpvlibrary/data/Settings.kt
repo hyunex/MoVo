@@ -68,6 +68,10 @@ class SettingsRepo(private val context: Context) {
         fun rejectionMessage(): String = rejected.distinct().joinToString("\n") {
             "${it.key}: ${it.reason.explanation}"
         }
+
+        /** Accepted lines playback skips because the speed and alignment settings own them. */
+        val appOwnedKeys: List<String>
+            get() = options.map { it.first }.filter { it in APP_OWNED_OPTIONS }.distinct()
     }
 
     companion object {
@@ -99,6 +103,8 @@ class SettingsRepo(private val context: Context) {
         const val DEFAULT_CONTINUE_PLAYLIST = "folder"
         const val DEFAULT_VIDEO_ALIGN_Y = "-1"
         const val DEFAULT_MPV_OPTIONS = ""
+        /** Saved from the editor for compatibility, then skipped by playback in favor of dedicated settings. */
+        val APP_OWNED_OPTIONS = setOf("speed", "video-align-y")
 
         fun formatSpeed(value: Double): String =
             "%.2f".format(Locale.US, value).trimEnd('0').trimEnd('.') + "x"

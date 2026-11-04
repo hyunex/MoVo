@@ -43,8 +43,9 @@ interface VideoDao {
     @Query("SELECT * FROM videos WHERE uri = :uri")
     suspend fun byUri(uri: String): VideoEntity?
 
-    @Query("SELECT * FROM videos WHERE lastPlayedAt > 0 ORDER BY lastPlayedAt DESC LIMIT :limit")
-    fun observeRecent(limit: Int): Flow<List<VideoEntity>>
+    /** Mirrors [VideoEntity.isInProgress]; filtering after LIMIT let finished rows evict unfinished ones. */
+    @Query("SELECT * FROM videos WHERE lastPlayedAt > 0 AND positionSec > 0 AND watchedOverride != 1 AND (watchedOverride != 0 OR (CASE WHEN durationSec > 0 THEN MIN(MAX(positionSec / durationSec, 0.0), 1.0) ELSE 0.0 END) < :threshold) ORDER BY lastPlayedAt DESC LIMIT :limit")
+    fun observeContinueWatching(threshold: Double, limit: Int): Flow<List<VideoEntity>>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertNew(videos: List<VideoEntity>)
@@ -74,14 +75,15 @@ interface VideoDao {
     @Query("UPDATE videos SET positionSec = :position, durationSec = CASE WHEN :duration > 0 THEN :duration ELSE durationSec END, lastPlayedAt = :now, watchedOverride = CASE WHEN watchedOverride = -1 THEN -1 ELSE 1 END WHERE uri = :uri")
     suspend fun saveCompletedProgress(uri: String, position: Double, duration: Double, now: Long)
 
-    @Query("UPDATE videos SET watchedOverride = :override WHERE uri = :uri")
-    suspend fun setOverride(uri: String, override: Int)
+    @Query("UPDATE videos SET watchedOverride = 1 WHERE uri IN (:uris)")
+    suspend fun markWatched(uris: List<String>)
 
     @Query("DELETE FROM videos WHERE uri IN (:uris)")
     suspend fun deleteByUris(uris: List<String>)
 
-    @Query("UPDATE videos SET watchedOverride = :override WHERE uri IN (:uris)")
-    suspend fun setOverrideBatch(uris: List<String>, override: Int)
+    /** A kept end position would resume at EOF; from 0:00 the threshold judges the next viewing. */
+    @Query("UPDATE videos SET positionSec = 0.0, watchedOverride = 0 WHERE uri IN (:uris)")
+    suspend fun markUnwatched(uris: List<String>)
 
     @Query("UPDATE videos SET positionSec = 0.0, lastPlayedAt = 0, watchedOverride = 0 WHERE uri IN (:uris)")
     suspend fun resetProgressBatch(uris: List<String>)

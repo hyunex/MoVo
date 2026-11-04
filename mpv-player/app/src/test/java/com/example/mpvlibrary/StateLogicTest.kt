@@ -99,6 +99,13 @@ class StateLogicTest {
             parsed.normalizedText)
     }
 
+    @Test fun mpvLinesOwnedByAppSettingsAreSavedButReportedAsNotApplied() {
+        val parsed = SettingsRepo.parseMpvOptions("hwdec=auto\nSPEED=1.5\nvideo_align_y=-1\nspeed=2")
+        assertTrue(parsed.rejected.isEmpty())
+        assertEquals(listOf("speed", "video-align-y"), parsed.appOwnedKeys)
+        assertTrue(SettingsRepo.parseMpvOptions("hwdec=auto\nprofile=fast").appOwnedKeys.isEmpty())
+    }
+
     @Test fun mpvFileWritersCannotEnterAcceptedOptionsViaAliases() {
         val keys = listOf("log-file", "--LOG_FILE", "-- no-log-file", "stream-record",
             "stream-dump", "screenshot-dir", "screenshot-directory", "screenshot-template",
