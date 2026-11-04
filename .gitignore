@@ -18,6 +18,7 @@ local.properties
 *.password.txt
 /.movo-signing/
 /release-artifacts/
+/source-archives/
 /.release-staging-*/
 
 # Debug logs & local artifacts
