@@ -249,6 +249,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var sourceNote: String = ""
     private var lastPosition = 0.0
     private var lastDuration = 0.0
+    /** The finished item is re-armed at 0:00; its saved completion position stays until the user plays or seeks. */
+    private var heldAfterEnd = false
     private var pollJob: Job? = null
     private var setupJob: Job? = null
     private var initialized = false
@@ -868,7 +870,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun persistProgress(pos: Double, dur: Double, uri: String?, completed: Boolean = false) {
-        if (uri == null || pos < 0 || !pos.isFinite() || !dur.isFinite()) return
+        if (heldAfterEnd || uri == null || pos < 0 || !pos.isFinite() || !dur.isFinite()) return
         LibraryWork.saveProgress(applicationContext, uri, pos, dur.coerceAtLeast(0.0), System.currentTimeMillis(), completed)
     }
 
@@ -883,6 +885,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private fun setUserPlayback(play: Boolean) {
         if (destroyed) return
         if (play) {
+            heldAfterEnd = false
             playbackIntent.play()
             if (!playbackIntent.hasFocus) requestAudioFocus()
         } else {
@@ -900,6 +903,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     private fun seekTo(target: Double) {
         if (!target.isFinite() || target < 0 || loadPending) return
+        heldAfterEnd = false
         mpv("seek absolute $target") {
             MPVLib.command(arrayOf("seek", target.toString(), "absolute+exact"))
             requestedSeek.request(target)
@@ -937,6 +941,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private fun advance() {
         if (index >= uris.size - 1) return
         captureCurrentProgress()
+        heldAfterEnd = false
         index += 1
         beginManualSwitch(index)
         resetControlsTimer()
@@ -945,6 +950,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private fun previousFile() {
         if (index <= 0) return
         captureCurrentProgress()
+        heldAfterEnd = false
         index -= 1
         beginManualSwitch(index)
         resetControlsTimer()
@@ -2706,6 +2712,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     // keep-open=no leaves mpv idle at EOF; reload so play and seek still work.
                     setUserPlayback(false)
                     beginManualSwitch(index, restart = true)
+                    heldAfterEnd = true
                 }
                 PlaybackEndAction.ERROR -> {
                     setUserPlayback(false)
