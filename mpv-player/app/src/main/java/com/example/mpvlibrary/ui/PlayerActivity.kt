@@ -12,7 +12,6 @@ import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Bundle
 import android.view.KeyEvent
-import android.view.WindowManager
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -61,6 +60,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.example.mpvlibrary.data.AppDb
@@ -198,6 +198,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     companion object {
         private const val TAG = "mpv"
         private const val EXTRA_PLAYLIST = "playlist"
+        private const val MAX_AUTO_SUBTITLES = 8
+        private const val PLAYLIST_SNAPSHOT_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000
         const val EXTRA_INDEX = "index"
 
         fun start(context: Context, uris: List<String>, index: Int) {
@@ -206,6 +208,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 val store = PlayerPlaylistStore(application.filesDir.resolve("player-playlists"))
                 var token: String? = null
                 try {
+                    store.pruneOlderThan(System.currentTimeMillis(), PLAYLIST_SNAPSHOT_MAX_AGE_MS)
                     val saved = store.save(uris)
                     token = saved
                     val i = Intent(context, PlayerActivity::class.java)
@@ -247,8 +250,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var lastPosition = 0.0
     private var lastDuration = 0.0
     private var pollJob: Job? = null
+    private var setupJob: Job? = null
     private var initialized = false
-    private var activeEntryId: Long? = null
+    private var activeEntryId by mutableStateOf<Long?>(null)
     private var loadPending = true
     private var loadSubmitted = false
     private var rejectedEntryId: Long? = null
@@ -275,7 +279,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var lastBrightness = -1f
     private var autoSubDoneIndex = -1
     private var subPlayables = mutableListOf<MpvPath.Playable>()
+    private val retiredPlayables = mutableListOf<MpvPath.Playable>()
     private val externalSubtitleUris = arrayListOf<String>()
+    // Persisted only so a process-death restore can re-open them; released when the player finishes.
+    private val subtitleGrants = arrayListOf<String>()
     private var noisyReceiver: android.content.BroadcastReceiver? = null
 
     // Bluetooth / Car AV MediaSession & AudioFocus
@@ -323,6 +330,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
 
     /** Every native touchpoint funnels here: never throws, always logged. */
     private inline fun mpv(what: String, f: () -> Unit) {
+        if (!initialized) return
         try {
             f()
         } catch (e: Exception) {
@@ -346,7 +354,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         // P0: pause when headphones disconnect
         noisyReceiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(ctx: Context?, intent: Intent?) {
-                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && !isPaused && initialized && !isFinishing) {
+                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && playbackIntent.wantsPlay && initialized && !isFinishing) {
                     AppLog.i(TAG, "headset disconnected — auto pause")
                     setUserPlayback(false)
                 }
@@ -359,7 +367,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
             )
         }.onFailure { AppLog.w(TAG, "noisy receiver register failed: $it") }
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
@@ -379,13 +386,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             showSpeedDialog = it.getBoolean("session.speedDialog")
             showAudioDialog = it.getBoolean("session.audioDialog")
             showSubDialog = it.getBoolean("session.subDialog")
+            it.getStringArrayList("session.subtitleGrants")?.let(subtitleGrants::addAll)
         }
         lifecycleScope.launch {
             try {
                 uris = withContext(Dispatchers.IO) {
                     PlayerPlaylistStore(filesDir.resolve("player-playlists")).load(checkNotNull(playlistToken))
                 }
-                finishCreate()
+                if (!destroyed) finishCreate()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -410,6 +418,9 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             MaterialTheme(colorScheme = darkColorScheme()) {
                 var showTitleDialog by rememberSaveable { mutableStateOf(false) }
                 LaunchedEffect(controlsVisible, isLocked) { updateSystemBars() }
+                val view = LocalView.current
+                val playing = !isPaused && activeEntryId != null
+                SideEffect { view.keepScreenOn = playing }
                 // External subtitle file picker launcher
                 val subPicker = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument(),
@@ -417,6 +428,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                     if (uri != null) {
                         try {
                             contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            if (uri.toString() !in subtitleGrants) subtitleGrants += uri.toString()
                         } catch (_: Exception) {}
                         val generation = loadGeneration
                         lifecycleScope.launch {
@@ -435,7 +447,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         factory = { ctx ->
                             MPVPlayerView(ctx, null).also { v ->
                                 playerView = v
-                                lifecycleScope.launch { setupPlayer(v) }
+                                setupJob = lifecycleScope.launch { setupPlayer(v) }
                             }
                         },
                     )
@@ -628,7 +640,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private suspend fun setupPlayer(view: MPVPlayerView) {
-        if (initialized) return
+        if (initialized || destroyed) return
         initialized = true
         try {
             val configDir = filesDir.resolve("mpv-config").apply { mkdirs() }.absolutePath
@@ -707,6 +719,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             playCurrent(view)
             startPolling()
             resetControlsTimer()
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             fail("플레이어 초기화 실패: ${e.message}")
         }
@@ -732,8 +746,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         }
         // Resolve without reassigning the visible/current item until this request wins.
         autoSubDoneIndex = -1
-        subPlayables.forEach { runCatching { it.close() } }
-        subPlayables.clear()
         val entity = withContext(Dispatchers.IO) { AppDb.get(this@PlayerActivity).videos().byUri(uriStr) }
         if (generation != loadGeneration || destroyed) return null
         val title = entity?.name ?: Uri.parse(uriStr).lastPathSegment ?: "동영상"
@@ -766,7 +778,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             fail("파일을 열 수 없음: $title")
             return null
         }
-        playable?.close()
+        // mpv borrows fd:// descriptors; they stay open until the replacing entry starts.
+        playable?.let { retiredPlayables += it }
+        retiredPlayables += subPlayables
+        subPlayables.clear()
         playable = next
         sourceNote = next.note
         currentUri = uriStr
@@ -827,6 +842,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun refreshTracks() {
+        if (!initialized) return
         runCatching {
             subTracks = loadTracks("sub")
             audioTracks = loadTracks("audio")
@@ -865,6 +881,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun setUserPlayback(play: Boolean) {
+        if (destroyed) return
         if (play) {
             playbackIntent.play()
             if (!playbackIntent.hasFocus) requestAudioFocus()
@@ -934,6 +951,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     }
 
     private fun engineEntryId(): Long? {
+        if (!initialized) return null
         val playing = MPVLib.getPropertyString("playlist-playing-pos")?.toLongOrNull()
             ?.takeIf { it >= 0 } ?: return null
         return MPVLib.getPropertyString("playlist/$playing/id")?.toLongOrNull()
@@ -1308,22 +1326,24 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                         dir = dir.findFile(seg) ?: return@launch
                     }
                 }
-                val matches = MpvPath.matchSubtitles(entity.name, dir.listFiles().mapNotNull { it.name })
+                val listing = dir.listFiles().mapNotNull { doc -> doc.name?.let { it to doc } }.toMap()
+                val matches = MpvPath.matchSubtitles(entity.name, listing.keys.toList()).take(MAX_AUTO_SUBTITLES)
                 if (matches.isEmpty()) return@launch
-                AppLog.i(TAG, "auto-sub found ${matches.size}: ${matches.joinToString()}")
+                AppLog.i(TAG, "auto-sub found ${matches.size}")
+                // Real file paths: mpv subtitle demuxers often reject fd://.
+                val cached = matches.mapNotNull { name ->
+                    MpvPath.cacheCopy(this@PlayerActivity, listing.getValue(name).uri, name)
+                }
+                if (cached.isEmpty()) return@launch
                 withContext(Dispatchers.Main) {
                     if (destroyed || generation != loadGeneration || loadPending) return@withContext
-                    matches.forEachIndexed { i, name ->
-                        val doc = dir.findFile(name) ?: return@forEachIndexed
-                        // Real file path: mpv subtitle demuxers often reject fd://.
-                        val cached = MpvPath.cacheCopy(this@PlayerActivity, doc.uri, name)
-                            ?: return@forEachIndexed
-                        mpv("자막 자동추가 $name") {
-                            MPVLib.command(arrayOf("sub-add", cached.absolutePath, if (i == 0) "select" else "auto"))
+                    cached.forEachIndexed { i, file ->
+                        mpv("자막 자동추가 #${i + 1}") {
+                            MPVLib.command(arrayOf("sub-add", file.absolutePath, if (i == 0) "select" else "auto"))
                         }
                     }
                     refreshTracks()
-                    showHud(HudMode.ASPECT, "외부 자막 ${matches.size}개 자동 로드")
+                    showHud(HudMode.ASPECT, "외부 자막 ${cached.size}개 자동 로드")
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -2661,6 +2681,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             if (current != playlistEntryId || playlistEntryId == rejectedEntryId) return@runOnUiThread
             activeEntryId = playlistEntryId
             loadPending = false
+            // mpv starts an entry only after the previous entry's demuxers and streams are freed.
+            closeRetiredPlayables()
         }
     }
 
@@ -2676,7 +2698,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             when (playbackEndAction(reason, error, playlistEntryId, endingEntry, repeatOne, autoAdvance && index < uris.size - 1)) {
                 PlaybackEndAction.REPEAT -> beginManualSwitch(index, restart = true)
                 PlaybackEndAction.ADVANCE -> advance()
-                PlaybackEndAction.PAUSE -> setUserPlayback(false)
+                PlaybackEndAction.PAUSE -> {
+                    // keep-open=no leaves mpv idle at EOF; reload so play and seek still work.
+                    setUserPlayback(false)
+                    beginManualSwitch(index, restart = true)
+                }
                 PlaybackEndAction.ERROR -> {
                     setUserPlayback(false)
                     fail("재생 오류 (error=$error)")
@@ -2767,6 +2793,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         outState.putBoolean("session.speedDialog", showSpeedDialog)
         outState.putBoolean("session.audioDialog", showAudioDialog)
         outState.putBoolean("session.subDialog", showSubDialog)
+        outState.putStringArrayList("session.subtitleGrants", subtitleGrants)
         if (initialized && !loadPending && activeEntryId != null) {
             runCatching {
                 if (engineEntryId() == activeEntryId) {
@@ -2795,10 +2822,20 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         gestureEpoch++
         restoreHeldSpeed()
         applyPlaybackGate()
+        // libmpv is a process singleton: the next player's onCreate can run before this onDestroy.
+        if (isFinishing) releasePlayer()
         super.onPause()
     }
 
     override fun onDestroy() {
+        releasePlayer()
+        super.onDestroy()
+        AppLog.i(TAG, "PlayerActivity destroyed")
+    }
+
+    /** Idempotent; afterwards no callback of this instance may reach the engine. */
+    private fun releasePlayer() {
+        if (destroyed) return
         captureCurrentProgress()
         destroyed = true
         loadGeneration++
@@ -2810,15 +2847,14 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                 runCatching { PlayerPlaylistStore(application.filesDir.resolve("player-playlists")).remove(token) }
                     .onFailure { AppLog.w(TAG, "playlist cleanup failed: ${it.message}") }
             }
+            for (uri in subtitleGrants) runCatching {
+                contentResolver.releasePersistableUriPermission(Uri.parse(uri), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
         }
-        super.onDestroy()
+        setupJob?.cancel()
         pollJob?.cancel()
         controlsTimerJob?.cancel()
         hudJob?.cancel()
-        runCatching { playable?.close() }
-        playable = null
-        subPlayables.forEach { runCatching { it.close() } }
-        subPlayables.clear()
         runCatching { noisyReceiver?.let { unregisterReceiver(it) } }
         noisyReceiver = null
         abandonAudioFocus()
@@ -2833,7 +2869,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             }.onFailure { AppLog.e(TAG, "teardown: $it") }
             initialized = false
         }
-        AppLog.i(TAG, "PlayerActivity destroyed")
+        playable?.let { retiredPlayables += it }
+        playable = null
+        retiredPlayables += subPlayables
+        subPlayables.clear()
+        closeRetiredPlayables()
+    }
+
+    private fun closeRetiredPlayables() {
+        retiredPlayables.forEach { runCatching { it.close() } }
+        retiredPlayables.clear()
     }
 
     private fun fmt(sec: Double): String {
