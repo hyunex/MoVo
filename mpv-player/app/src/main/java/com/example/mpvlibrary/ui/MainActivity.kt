@@ -888,29 +888,6 @@ class SafeDeleteState(
                             securityDeniedUris.add(u)
                         }
                     }
-                    if (!success) {
-                        val treeRes = runCatching {
-                            if (f != null) {
-                                val root = DocumentFile.fromTreeUri(context, Uri.parse(f.treeUri))
-                                if (root != null) {
-                                    var dir: DocumentFile? = root
-                                    if (entity.dirPath.isNotEmpty()) {
-                                        for (seg in entity.dirPath.split('/')) {
-                                            if (seg.isEmpty() || seg == "." || seg == "..") continue
-                                            dir = dir?.findFile(seg)
-                                            if (dir == null) break
-                                        }
-                                    }
-                                    dir?.findFile(entity.name)?.delete() == true
-                                } else false
-                            } else false
-                        }
-                        if (treeRes.isSuccess && treeRes.getOrNull() == true) {
-                            success = true
-                        } else if (treeRes.exceptionOrNull() is SecurityException) {
-                            securityDeniedUris.add(u)
-                        }
-                    }
                     if (success) {
                         deletedCount++
                         AppLog.i("library", "file deleted via SAF: $u")
