@@ -2689,7 +2689,11 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             when (playbackEndAction(reason, error, playlistEntryId, endingEntry, repeatOne, autoAdvance && index < uris.size - 1)) {
                 PlaybackEndAction.REPEAT -> beginManualSwitch(index, restart = true)
                 PlaybackEndAction.ADVANCE -> advance()
-                PlaybackEndAction.PAUSE -> setUserPlayback(false)
+                PlaybackEndAction.PAUSE -> {
+                    // keep-open=no leaves mpv idle at EOF; reload so play and seek still work.
+                    setUserPlayback(false)
+                    beginManualSwitch(index, restart = true)
+                }
                 PlaybackEndAction.ERROR -> {
                     setUserPlayback(false)
                     fail("재생 오류 (error=$error)")
