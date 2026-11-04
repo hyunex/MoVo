@@ -618,6 +618,12 @@ fun LibraryScreen(
                             IconButton(onClick = { scope.launch(Dispatchers.IO) { scanner.scanAll(retryMetadata = true) } }) {
                                 Icon(Icons.Default.Refresh, "스캔")
                             }
+                            val selectedFolder = (sel as? HomeSelection.Folder)?.let { s -> folders.find { it.id == s.folderId } }
+                            if (selectedFolder != null) {
+                                IconButton(onClick = { requestFolderUnregister(selectedFolder) }) {
+                                    Icon(Icons.Default.DeleteOutline, "폴더 등록 해제")
+                                }
+                            }
                             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "설정") }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -663,6 +669,7 @@ fun LibraryScreen(
                                                 folderPath = ""
                                                 selection = HomeSelection.Folder(f.id, "")
                                             },
+                                            onLongClickLabel = "폴더 등록 해제",
                                             onLongClick = { requestFolderUnregister(f) },
                                         ),
                                     ) {
@@ -1314,6 +1321,76 @@ fun FolderScreen(
         } else false
     }
 
+    val selectionActions: @Composable () -> Unit = {
+        val allSelected = here.isNotEmpty() && selectedUris.size == here.size
+        IconButton(onClick = {
+            selectedUris = if (allSelected) emptySet() else here.map { it.uri }.toSet()
+        }) {
+            Icon(if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll, "모두 선택")
+        }
+        IconButton(onClick = {
+            val list = here.filter { selectedUris.contains(it.uri) }.map { it.uri }
+            if (list.isNotEmpty()) PlayerActivity.start(context, list, 0)
+        }) {
+            Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
+        }
+        IconButton(onClick = {
+            deleteState.requestDelete(videos.filter { it.uri in selectedUris })
+        }) {
+            Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
+        }
+        var showBatchMenu by remember { mutableStateOf(false) }
+        Box {
+            IconButton(onClick = { showBatchMenu = true }) {
+                Icon(Icons.Default.MoreVert, "작업 더보기")
+            }
+            DropdownMenu(
+                expanded = showBatchMenu,
+                onDismissRequest = { showBatchMenu = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("시청 완료로 표시") },
+                    leadingIcon = { Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF2E7D32)) },
+                    onClick = {
+                        val uris = selectedUris.toList()
+                        scope.launch(Dispatchers.IO) { db.videos().markWatched(uris) }
+                        selectedUris = emptySet()
+                        showBatchMenu = false
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("미시청으로 표시") },
+                    leadingIcon = { Icon(Icons.Default.RemoveDone, null) },
+                    onClick = {
+                        val uris = selectedUris.toList()
+                        scope.launch(Dispatchers.IO) { db.videos().markUnwatched(uris) }
+                        selectedUris = emptySet()
+                        showBatchMenu = false
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("재생 기록 초기화") },
+                    leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
+                    onClick = {
+                        val uris = selectedUris.toList()
+                        scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(uris) }
+                        selectedUris = emptySet()
+                        showBatchMenu = false
+                    },
+                )
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("선택 삭제", color = MaterialTheme.colorScheme.error) },
+                    leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    onClick = {
+                        deleteState.requestDelete(videos.filter { it.uri in selectedUris })
+                        showBatchMenu = false
+                    },
+                )
+            }
+        }
+    }
+
     val folderContent: @Composable (Modifier) -> Unit = { modifier ->
         Column(modifier.fillMaxSize()) {
             val status = scanStatus[folderId]
@@ -1376,23 +1453,7 @@ fun FolderScreen(
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.weight(1f),
                         )
-                        val allSelected = here.isNotEmpty() && selectedUris.size == here.size
-                        IconButton(onClick = {
-                            selectedUris = if (allSelected) emptySet() else here.map { it.uri }.toSet()
-                        }) {
-                            Icon(if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll, "모두 선택")
-                        }
-                        IconButton(onClick = {
-                            val list = here.filter { selectedUris.contains(it.uri) }.map { it.uri }
-                            if (list.isNotEmpty()) PlayerActivity.start(context, list, 0)
-                        }) {
-                            Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
-                        }
-                        IconButton(onClick = {
-                            deleteState.requestDelete(videos.filter { it.uri in selectedUris })
-                        }) {
-                            Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
-                        }
+                        selectionActions()
                     }
                 }
             }
@@ -1571,75 +1632,7 @@ fun FolderScreen(
                                 maxLines = 1,
                             )
                         },
-                        actions = {
-                            val allSelected = here.isNotEmpty() && selectedUris.size == here.size
-                            IconButton(onClick = {
-                                selectedUris = if (allSelected) emptySet() else here.map { it.uri }.toSet()
-                            }) {
-                                Icon(if (allSelected) Icons.Default.Deselect else Icons.Default.SelectAll, "모두 선택")
-                            }
-                            IconButton(onClick = {
-                                val list = here.filter { selectedUris.contains(it.uri) }.map { it.uri }
-                                if (list.isNotEmpty()) PlayerActivity.start(context, list, 0)
-                            }) {
-                                Icon(Icons.Default.PlayArrow, "선택 재생", tint = MaterialTheme.colorScheme.primary)
-                            }
-                            IconButton(onClick = {
-                                deleteState.requestDelete(videos.filter { it.uri in selectedUris })
-                            }) {
-                                Icon(Icons.Default.Delete, "삭제", tint = MaterialTheme.colorScheme.error)
-                            }
-                            var showBatchMenu by remember { mutableStateOf(false) }
-                            Box {
-                                IconButton(onClick = { showBatchMenu = true }) {
-                                    Icon(Icons.Default.MoreVert, "작업 더보기")
-                                }
-                                DropdownMenu(
-                                    expanded = showBatchMenu,
-                                    onDismissRequest = { showBatchMenu = false },
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("시청 완료로 표시") },
-                                        leadingIcon = { Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF2E7D32)) },
-                                        onClick = {
-                                            val uris = selectedUris.toList()
-                                            scope.launch(Dispatchers.IO) { db.videos().markWatched(uris) }
-                                            selectedUris = emptySet()
-                                            showBatchMenu = false
-                                        },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("미시청으로 표시") },
-                                        leadingIcon = { Icon(Icons.Default.RemoveDone, null) },
-                                        onClick = {
-                                            val uris = selectedUris.toList()
-                                            scope.launch(Dispatchers.IO) { db.videos().markUnwatched(uris) }
-                                            selectedUris = emptySet()
-                                            showBatchMenu = false
-                                        },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("재생 기록 초기화") },
-                                        leadingIcon = { Icon(Icons.Default.RestartAlt, null) },
-                                        onClick = {
-                                            val uris = selectedUris.toList()
-                                            scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(uris) }
-                                            selectedUris = emptySet()
-                                            showBatchMenu = false
-                                        },
-                                    )
-                                    HorizontalDivider()
-                                    DropdownMenuItem(
-                                        text = { Text("선택 삭제", color = MaterialTheme.colorScheme.error) },
-                                        leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                                        onClick = {
-                                            deleteState.requestDelete(videos.filter { it.uri in selectedUris })
-                                            showBatchMenu = false
-                                        },
-                                    )
-                                }
-                            }
-                        },
+                        actions = { selectionActions() },
                         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     )
                 } else {
