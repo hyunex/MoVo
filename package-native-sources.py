@@ -21,6 +21,7 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parent
 LOCK_PATH = ROOT / 'mpv-player/native/sources.lock.json'
+NOTICES_PATH = ROOT / 'THIRD-PARTY-NOTICES.md'
 EXCLUDED_DIRS = {'.git', '.gradle', 'build', 'jniLibs', '__pycache__', '.idea', '.cxx', 'node_modules'}
 EXCLUDED_SUFFIXES = {'.so', '.apk', '.aab', '.jks', '.keystore', '.p12', '.pfx', '.pem', '.key', '.log', '.pyc', '.class'}
 
@@ -47,6 +48,19 @@ def lock_data() -> dict:
 def check_archive(path: Path, pin: dict) -> None:
     if not path.is_file() or path.stat().st_size != pin['bytes'] or digest(path) != pin['sha256']:
         raise ValueError(f"archive size/SHA256 mismatch: {path} ({pin['name']})")
+
+
+def check_notices(lock: dict) -> None:
+    rows = set()
+    for line in NOTICES_PATH.read_text().splitlines():
+        if line.startswith('| `'):
+            cells = [cell.strip().strip('`') for cell in line.strip().strip('|').split('|')]
+            rows.add((cells[0], cells[1]))
+    required = [(pin['name'], pin['revision']) for pin in lock['sources']]
+    required.append(('libc++', 'NDK ' + lock['toolchain']['ndk']))
+    missing = [f'{name} {revision}' for name, revision in required if (name, revision) not in rows]
+    if missing:
+        raise ValueError(f'{NOTICES_PATH.name} lacks a license row for: ' + ', '.join(missing))
 
 
 def archives(lock: dict, caches: list[Path], download: bool) -> dict[str, Path]:
@@ -213,6 +227,7 @@ def bundle(lock: dict, paths: dict[str, Path], binary_manifest: Path, destinatio
     checksum_path = destination.with_name(destination.name + '.sha256')
     if checksum_path.exists() or checksum_path.is_symlink():
         raise FileExistsError(checksum_path)
+    check_notices(lock)
     manifest = json.loads(binary_manifest.read_text())
     current = record_binaries(lock, ROOT / 'mpv-player/app/src/main/jniLibs')
     if manifest != current:

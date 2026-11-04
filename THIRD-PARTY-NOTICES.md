@@ -110,7 +110,48 @@ generates FFmpeg headers through its configure step, and compiles only the
 three JNI bridge targets. No complete-engine recompilation or device/runtime
 verification is asserted by this notice.
 
-## 3. AndroidX / Jetpack / Material / Kotlin (Apache License 2.0)
+## 3. Native components inside the engine libraries
+
+The engine libraries in `app/src/main/jniLibs/` and `libc++_shared.so` are
+built from the archives pinned in `mpv-player/native/sources.lock.json`.
+Each row names one lock entry, its pinned revision, its SPDX license
+expression, and the upstream copyright line with the file it was taken from.
+Rows marked "not in the APK" are build-time tools or demos. The complete
+license texts are in the named files inside each archive; all archives ship
+in `source-archives/` of `MoVo-corresponding-source.tar.gz`.
+`package-native-sources.py bundle` refuses to build that archive while a lock
+entry has no row here.
+
+| Lock entry | Revision | SPDX license | Copyright (license file) |
+| --- | --- | --- | --- |
+| `mpv` | `f4d13e1c2c91f3a56e589aef9cb44cbc02e26e47` | GPL-2.0-or-later | mpv, mplayer2 and MPlayer contributors (`Copyright`, `LICENSE.GPL`) |
+| `ffmpeg` | `n9.0` | GPL-3.0-or-later (built with `--enable-gpl --enable-version3`) | the FFmpeg developers (`LICENSE.md`, `COPYING.GPLv3`) |
+| `jni` | `ad98fc97ff1d25e217389e7238a1abda8c13a6c4` | MIT | Copyright (c) 2016 Ilya Zhuravlev; Copyright (c) 2016 sfan5 (`LICENSE`, quoted in section 1) |
+| `libplacebo` | `4d82c6898551068d4ae6a6b5538efcddc2c7cf64` | LGPL-2.1-or-later | libplacebo contributors; the file has no central copyright line (`LICENSE`, source headers) |
+| `placebo-vulkan-headers` | `74d8a6cb930c68ef617b202c3ff3c59d919e086b` | Apache-2.0 OR MIT | Copyright 2015-2023 The Khronos Group Inc. (`LICENSE.md`) |
+| `placebo-fast-float` | `97b54ca9e75f5303507699d27c6b4f4efe4641a1` | Apache-2.0 OR BSL-1.0 OR MIT | Copyright (c) 2021 The fast_float authors (`LICENSE-MIT`, `LICENSE-APACHE`, `LICENSE-BOOST`) |
+| `placebo-glad` | `73db193f853e2ee079bf3ca8a64aa2eaf6459043` | MIT AND Apache-2.0 | Copyright (c) 2013-2022 David Herberth; Copyright (c) 2013-2020 The Khronos Group Inc. (`LICENSE`) |
+| `placebo-jinja` | `15206881c006c79667fe5154fe80c01c65410679` | BSD-3-Clause | Copyright 2007 Pallets (`LICENSE.txt`); build-time code generator only, not in the APK |
+| `placebo-markupsafe` | `297fc8e356e6836a62087949245d09a28e9f1b13` | BSD-3-Clause | Copyright 2010 Pallets (`LICENSE.txt`); build-time code generator only, not in the APK |
+| `placebo-nuklear` | `242f35efa067a46c595645eeda7b1771ea1f83b1` | MIT OR Unlicense | Copyright (c) 2017 Micha Mettke (`LICENSE`); libplacebo demos only, not in the APK |
+| `libass` | `3087d2b2ffda76602a17f9b09d25cb8addc8d313` | ISC | Copyright (C) 2006-2016 libass contributors (`COPYING`) |
+| `dav1d` | `54706fc6bc0cdecab7e9593974a4039cc038fca7` | BSD-2-Clause | Copyright © 2018-2025, VideoLAN and dav1d authors (`COPYING`) |
+| `mbedtls` | `3.6.7` | Apache-2.0 OR GPL-2.0-or-later | Copyright The Mbed TLS Contributors (source headers; `LICENSE`) |
+| `freetype` | `0a0221a1347e2f1e07c395263540026e9a0aa7c7` | FTL OR GPL-2.0-or-later | Copyright (C) 1996-2026 by David Turner, Robert Wilhelm, and Werner Lemberg (`include/freetype/freetype.h`; `LICENSE.TXT`, `docs/FTL.TXT`) |
+| `freetype-dlg` | `395ccad2c1e0daae535c4d20bb0a3f2424648e17` | BSL-1.0 | Copyright (c) 2019 nyorain (`include/dlg/dlg.h`; `LICENSE`); compiled only with `FT_DEBUG_LOGGING` |
+| `fribidi` | `1.0.16` | LGPL-2.1-or-later | Copyright (C) 2004 Sharif FarsiWeb, Inc; Copyright (C) 2001,2002 Behdad Esfahbod; Copyright (C) 1999,2000 Dov Grobgeld (`COPYING`, `lib/fribidi.c`) |
+| `harfbuzz` | `14.2.1` | MIT-Modern-Variant | Copyright © 2010-2022 Google, Inc. and the other holders listed in `COPYING` |
+| `libunibreak` | `7.0` | Zlib | Copyright (C) Wu Yongwei, Tom Hacohen, Petr Filipsky, Andreas Röver (`LICENCE`) |
+| `libxml2` | `2.15.3` | MIT | Copyright (C) 1998-2012 Daniel Veillard; Copyright (C) The Libxml2 Contributors (`Copyright`) |
+| `fontconfig` | `2.18.2` | HPND-sell-variant, plus the per-file notices in `COPYING` | Copyright © 2000-2007 Keith Packard and the other holders listed in `COPYING` |
+| `lua` | `5.2.4` | MIT | Copyright (C) 1994-2015 Lua.org, PUC-Rio (`src/lua.h`) |
+| `curl` | `8.21.0` | curl | Copyright (c) 1996 - 2026, Daniel Stenberg, <daniel@haxx.se>, and many contributors (`COPYING`) |
+| `libc++` | `NDK 29.0.14206865` | Apache-2.0 WITH LLVM-exception | LLVM Project contributors; legacy code Copyright (c) 2003-2019 University of Illinois at Urbana-Champaign (NDK `toolchains/llvm/prebuilt/*/NOTICE`); shipped as `libc++_shared.so` |
+
+Portions of this software are copyright © 2026 The FreeType
+Project (https://freetype.org).  All rights reserved.
+
+## 4. AndroidX / Jetpack / Material / Kotlin (Apache License 2.0)
 
 The following Gradle runtime dependencies are Apache-2.0 licensed. Their
 upstream license/copyright notices must be preserved in binary and source
