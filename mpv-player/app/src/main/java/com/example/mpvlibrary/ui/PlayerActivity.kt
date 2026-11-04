@@ -1423,14 +1423,15 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
                                     val p1 = pressed[0].position
                                     val p2 = pressed[1].position
                                     initialPinchDist = (p1 - p2).getDistance().coerceAtLeast(10f)
-                                    baseZoom = MPVLib.getPropertyDouble("video-zoom") ?: 0.0
+                                    baseZoom = 0.0
+                                    mpv("read zoom") { baseZoom = MPVLib.getPropertyDouble("video-zoom") ?: 0.0 }
                                 } else {
                                     val p1 = pressed[0].position
                                     val p2 = pressed[1].position
                                     val dist = (p1 - p2).getDistance()
                                     val zoomLevel = pinchZoom(baseZoom, initialPinchDist, dist)
                                     val scale = Math.pow(2.0, zoomLevel).toFloat()
-                                    MPVLib.setPropertyDouble("video-zoom", zoomLevel)
+                                    mpv("pinch zoom") { MPVLib.setPropertyDouble("video-zoom", zoomLevel) }
                                     showHud(HudMode.ZOOM, "화면 배율: ${(scale * 100).roundToInt()}%", scale / 3.0f, autoDismiss = false)
                                 }
                                 pressed.forEach { it.consume() }
