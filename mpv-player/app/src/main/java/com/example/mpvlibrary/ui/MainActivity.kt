@@ -1172,7 +1172,7 @@ fun ContinueWatchingPane(
                         onActionWatched = {
                             scope.launch(Dispatchers.IO) {
                                 val uris = listOf(v.uri)
-                                if (watched) db.videos().markUnwatched(uris) else db.videos().markWatched(uris)
+                                if (watched) db.videos().markUnwatched(uris, threshold) else db.videos().markWatched(uris)
                             }
                         },
                         onActionReset = {
@@ -1363,7 +1363,7 @@ fun FolderScreen(
                     leadingIcon = { Icon(Icons.Default.RemoveDone, null) },
                     onClick = {
                         val uris = selectedUris.toList()
-                        scope.launch(Dispatchers.IO) { db.videos().markUnwatched(uris) }
+                        scope.launch(Dispatchers.IO) { db.videos().markUnwatched(uris, threshold) }
                         selectedUris = emptySet()
                         showBatchMenu = false
                     },
@@ -1597,7 +1597,7 @@ fun FolderScreen(
                                 val watched = v.isWatched(threshold)
                                 val uris = listOf(v.uri)
                                 scope.launch(Dispatchers.IO) {
-                                    if (watched) db.videos().markUnwatched(uris) else db.videos().markWatched(uris)
+                                    if (watched) db.videos().markUnwatched(uris, threshold) else db.videos().markWatched(uris)
                                 }
                             },
                             onActionReset = {

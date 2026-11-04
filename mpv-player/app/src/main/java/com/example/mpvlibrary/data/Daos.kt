@@ -81,9 +81,9 @@ interface VideoDao {
     @Query("DELETE FROM videos WHERE uri IN (:uris)")
     suspend fun deleteByUris(uris: List<String>)
 
-    /** A kept end position would resume at EOF; from 0:00 the threshold judges the next viewing. */
-    @Query("UPDATE videos SET positionSec = 0.0, watchedOverride = 0 WHERE uri IN (:uris)")
-    suspend fun markUnwatched(uris: List<String>)
+    /** Watched rows restart at 0:00 (a kept end position would resume at EOF); in-progress rows keep their resume point. */
+    @Query("UPDATE videos SET positionSec = CASE WHEN watchedOverride = 1 OR (CASE WHEN durationSec > 0 THEN MIN(MAX(positionSec / durationSec, 0.0), 1.0) ELSE 0.0 END) >= :threshold THEN 0.0 ELSE positionSec END, watchedOverride = 0 WHERE uri IN (:uris)")
+    suspend fun markUnwatched(uris: List<String>, threshold: Double)
 
     @Query("UPDATE videos SET positionSec = 0.0, lastPlayedAt = 0, watchedOverride = 0 WHERE uri IN (:uris)")
     suspend fun resetProgressBatch(uris: List<String>)
