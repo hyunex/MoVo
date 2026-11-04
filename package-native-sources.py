@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import urllib.request
@@ -193,23 +194,24 @@ def source_files() -> list[Path]:
                 'mpv-player/gradle.properties', 'mpv-player/gradlew', 'mpv-player/gradlew.bat',
                 'README.md', 'VERSION', 'LICENSE', 'THIRD-PARTY-NOTICES.md',
                 'package-native-sources.py', 'package-release.py']
-    files = set()
     for name in selected:
-        root = ROOT / name
-        if not root.exists():
-            raise FileNotFoundError(f'required source input: {root}')
-        candidates = root.rglob('*') if root.is_dir() else [root]
-        for path in candidates:
-            rel = path.relative_to(ROOT)
-            lower = path.name.lower()
-            if any(part in EXCLUDED_DIRS for part in rel.parts) or path.suffix.lower() in EXCLUDED_SUFFIXES:
-                continue
-            if 'signing' in lower or 'password' in lower or lower in {'local.properties', '.env', 'key.properties', 'keystore.properties'}:
-                continue
-            if path.is_symlink():
-                raise ValueError(f'source symlink is not allowed: {rel}')
-            if path.is_file():
-                files.add(path)
+        if not (ROOT / name).exists():
+            raise FileNotFoundError(f'required source input: {ROOT / name}')
+    tracked = subprocess.run(['git', '-C', str(ROOT), 'ls-files', '-z', '--', *selected],
+                             check=True, capture_output=True).stdout.decode().split('\0')
+    files = set()
+    for name in filter(None, tracked):
+        rel = Path(name)
+        path = ROOT / rel
+        lower = path.name.lower()
+        if any(part in EXCLUDED_DIRS for part in rel.parts) or path.suffix.lower() in EXCLUDED_SUFFIXES:
+            continue
+        if 'signing' in lower or 'password' in lower or lower in {'local.properties', '.env', 'key.properties', 'keystore.properties'}:
+            continue
+        if path.is_symlink():
+            raise ValueError(f'source symlink is not allowed: {rel}')
+        if path.is_file():
+            files.add(path)
     return sorted(files)
 
 
