@@ -276,6 +276,7 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
     private var lastBrightness = -1f
     private var autoSubDoneIndex = -1
     private var subPlayables = mutableListOf<MpvPath.Playable>()
+    private val retiredPlayables = mutableListOf<MpvPath.Playable>()
     private val externalSubtitleUris = arrayListOf<String>()
     private var noisyReceiver: android.content.BroadcastReceiver? = null
 
@@ -736,8 +737,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         }
         // Resolve without reassigning the visible/current item until this request wins.
         autoSubDoneIndex = -1
-        subPlayables.forEach { runCatching { it.close() } }
-        subPlayables.clear()
         val entity = withContext(Dispatchers.IO) { AppDb.get(this@PlayerActivity).videos().byUri(uriStr) }
         if (generation != loadGeneration || destroyed) return null
         val title = entity?.name ?: Uri.parse(uriStr).lastPathSegment ?: "동영상"
@@ -770,7 +769,10 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             fail("파일을 열 수 없음: $title")
             return null
         }
-        playable?.close()
+        // mpv borrows fd:// descriptors; they stay open until the replacing entry starts.
+        playable?.let { retiredPlayables += it }
+        retiredPlayables += subPlayables
+        subPlayables.clear()
         playable = next
         sourceNote = next.note
         currentUri = uriStr
@@ -2668,6 +2670,8 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             if (current != playlistEntryId || playlistEntryId == rejectedEntryId) return@runOnUiThread
             activeEntryId = playlistEntryId
             loadPending = false
+            // mpv starts an entry only after the previous entry's demuxers and streams are freed.
+            closeRetiredPlayables()
         }
     }
 
@@ -2832,10 +2836,6 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
         pollJob?.cancel()
         controlsTimerJob?.cancel()
         hudJob?.cancel()
-        runCatching { playable?.close() }
-        playable = null
-        subPlayables.forEach { runCatching { it.close() } }
-        subPlayables.clear()
         runCatching { noisyReceiver?.let { unregisterReceiver(it) } }
         noisyReceiver = null
         abandonAudioFocus()
@@ -2850,6 +2850,16 @@ class PlayerActivity : ComponentActivity(), MPVLib.EventObserver, MPVLib.LogObse
             }.onFailure { AppLog.e(TAG, "teardown: $it") }
             initialized = false
         }
+        playable?.let { retiredPlayables += it }
+        playable = null
+        retiredPlayables += subPlayables
+        subPlayables.clear()
+        closeRetiredPlayables()
+    }
+
+    private fun closeRetiredPlayables() {
+        retiredPlayables.forEach { runCatching { it.close() } }
+        retiredPlayables.clear()
     }
 
     private fun fmt(sec: Double): String {
