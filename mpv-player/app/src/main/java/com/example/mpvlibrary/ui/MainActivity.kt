@@ -1169,7 +1169,8 @@ fun ContinueWatchingPane(
                         onLongClick = { onPlay(v) },
                         onActionWatched = {
                             scope.launch(Dispatchers.IO) {
-                                db.videos().setOverride(v.uri, if (watched) -1 else 1)
+                                val uris = listOf(v.uri)
+                                if (watched) db.videos().markUnwatched(uris) else db.videos().markWatched(uris)
                             }
                         },
                         onActionReset = {
@@ -1531,8 +1532,11 @@ fun FolderScreen(
                                 },
                                 onLongClick = { toggleSelect(v.uri) },
                                 onActionWatched = {
-                                    val next = if (v.isWatched(threshold)) -1 else 1
-                                    scope.launch(Dispatchers.IO) { db.videos().setOverride(v.uri, next) }
+                                    val watched = v.isWatched(threshold)
+                                    val uris = listOf(v.uri)
+                                    scope.launch(Dispatchers.IO) {
+                                        if (watched) db.videos().markUnwatched(uris) else db.videos().markWatched(uris)
+                                    }
                                 },
                                 onActionReset = {
                                     scope.launch(Dispatchers.IO) { db.videos().resetProgressBatch(listOf(v.uri)) }
@@ -1599,7 +1603,7 @@ fun FolderScreen(
                                         leadingIcon = { Icon(Icons.Default.CheckCircle, null, tint = Color(0xFF2E7D32)) },
                                         onClick = {
                                             val uris = selectedUris.toList()
-                                            scope.launch(Dispatchers.IO) { db.videos().setOverrideBatch(uris, 1) }
+                                            scope.launch(Dispatchers.IO) { db.videos().markWatched(uris) }
                                             selectedUris = emptySet()
                                             showBatchMenu = false
                                         },
@@ -1609,7 +1613,7 @@ fun FolderScreen(
                                         leadingIcon = { Icon(Icons.Default.RemoveDone, null) },
                                         onClick = {
                                             val uris = selectedUris.toList()
-                                            scope.launch(Dispatchers.IO) { db.videos().setOverrideBatch(uris, -1) }
+                                            scope.launch(Dispatchers.IO) { db.videos().markUnwatched(uris) }
                                             selectedUris = emptySet()
                                             showBatchMenu = false
                                         },

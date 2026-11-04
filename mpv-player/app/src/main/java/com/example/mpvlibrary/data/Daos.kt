@@ -75,14 +75,15 @@ interface VideoDao {
     @Query("UPDATE videos SET positionSec = :position, durationSec = CASE WHEN :duration > 0 THEN :duration ELSE durationSec END, lastPlayedAt = :now, watchedOverride = CASE WHEN watchedOverride = -1 THEN -1 ELSE 1 END WHERE uri = :uri")
     suspend fun saveCompletedProgress(uri: String, position: Double, duration: Double, now: Long)
 
-    @Query("UPDATE videos SET watchedOverride = :override WHERE uri = :uri")
-    suspend fun setOverride(uri: String, override: Int)
+    @Query("UPDATE videos SET watchedOverride = 1 WHERE uri IN (:uris)")
+    suspend fun markWatched(uris: List<String>)
 
     @Query("DELETE FROM videos WHERE uri IN (:uris)")
     suspend fun deleteByUris(uris: List<String>)
 
-    @Query("UPDATE videos SET watchedOverride = :override WHERE uri IN (:uris)")
-    suspend fun setOverrideBatch(uris: List<String>, override: Int)
+    /** A kept end position would resume at EOF; from 0:00 the threshold judges the next viewing. */
+    @Query("UPDATE videos SET positionSec = 0.0, watchedOverride = 0 WHERE uri IN (:uris)")
+    suspend fun markUnwatched(uris: List<String>)
 
     @Query("UPDATE videos SET positionSec = 0.0, lastPlayedAt = 0, watchedOverride = 0 WHERE uri IN (:uris)")
     suspend fun resetProgressBatch(uris: List<String>)
